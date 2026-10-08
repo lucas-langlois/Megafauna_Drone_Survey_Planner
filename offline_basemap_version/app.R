@@ -46,6 +46,7 @@ library(leaflet.extras) # For draw tools
 library(zip)       # For KMZ creation
 
 source("local_basemap.R", local = TRUE)
+source("planning_tools.R", local = TRUE)
 
 # Digital Earth Australia OGC Web Map Service. The tidal-composite layer's
 # default time is the latest published annual composite.
@@ -254,6 +255,15 @@ ui <- fluidPage(
           "Rotation uses the AOI centre. Afterwards, use the map Edit tool to move vertices or drag the whole AOI, then Save."
         )
       ),
+      tags$details(
+        class = "aoi-resize-panel",
+        tags$summary("Distance measurement"),
+        tags$p(class = "help-block",
+          "Use the ruler control at the top-right of the map to measure from shore, the start point, or between any points. Results show metres with kilometres alongside. While drawing the survey polygon, the draw tooltip also shows metric area; the installed draw version does not show per-edge lengths."),
+        tags$p(class = "help-block",
+          "Measurements are separate from the survey area and mission calculations. Finish or delete a measurement with the control's own options; this never deletes the survey area. The ruler works offline once the app has loaded.")
+      ),
+      restriction_tools_ui(),
       tags$br(), tags$br(),
 
       # --- Flight Settings ---
@@ -1801,6 +1811,7 @@ server <- function(input, output, session) {
       removeLayersControl() %>%
       addLayersControl(
         baseGroups = groups,
+        overlayGroups = c(restriction_group),
         options = layersControlOptions(collapsed = FALSE)
       )
   }
@@ -2286,6 +2297,12 @@ server <- function(input, output, session) {
     }, delay = 0.3)
   }
 
+  # Advisory restriction import. Warnings derive from drawn_polygon(), so they
+  # update after draws, edits, drags, imports, resizes, and rotations. Hiding
+  # the overlay never suppresses the warning. The import is session-local and
+  # works offline.
+  restriction_zones <- restriction_tools_server(input, output, session, drawn_polygon)
+
   # --- Observer for Clear Polygon Button ---
   observeEvent(input$clear_polygon, {
     drawn_polygon(NULL)
@@ -2396,6 +2413,7 @@ server <- function(input, output, session) {
       setView(lng = 146.8169, lat = -19.2590, zoom = 7) %>% # Center on Townsville, showing entire QLD coast
       addLayersControl(
         baseGroups = online_basemap_groups,
+        overlayGroups = c(restriction_group),
         options = layersControlOptions(collapsed = FALSE)
       ) %>%
       addControl(
@@ -2420,6 +2438,13 @@ server <- function(input, output, session) {
               event.name === 'DEA Intertidal Extent (2024)' ? '' : 'none';
           });
         }"
+      ) %>%
+      leaflet::addMeasure(
+        position = "topright",
+        primaryLengthUnit = "meters",
+        secondaryLengthUnit = "kilometers",
+        primaryAreaUnit = "sqmeters",
+        secondaryAreaUnit = "hectares"
       ) %>%
       leaflet.extras::addDrawToolbar(
         targetGroup = "drawn_poly",

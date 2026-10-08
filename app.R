@@ -36,6 +36,8 @@ library(shinyjs)   # For enabling/disabling buttons
 library(leaflet.extras) # For draw tools
 library(zip)       # For KMZ creation
 
+source("planning_tools.R", local = TRUE)
+
 # Digital Earth Australia OGC Web Map Service. The tidal-composite layer's
 # default time is the latest published annual composite.
 dea_wms_url <- "https://ows.dea.ga.gov.au/"
@@ -190,6 +192,15 @@ ui <- fluidPage(
           "Rotation uses the AOI centre. Afterwards, use the map Edit tool to move vertices or drag the whole AOI, then Save."
         )
       ),
+      tags$details(
+        class = "aoi-resize-panel",
+        tags$summary("Distance measurement"),
+        tags$p(class = "help-block",
+          "Use the ruler control at the top-right of the map to measure from shore, the start point, or between any points. Results show metres with kilometres alongside. While drawing the survey polygon, the draw tooltip also shows metric area; the installed draw version does not show per-edge lengths."),
+        tags$p(class = "help-block",
+          "Measurements are separate from the survey area and mission calculations. Finish or delete a measurement with the control's own options; this never deletes the survey area.")
+      ),
+      restriction_tools_ui(),
       tags$br(), tags$br(),
 
       # --- Flight Settings ---
@@ -2279,6 +2290,11 @@ server <- function(input, output, session) {
     }, delay = 0.3)
   }
 
+  # Advisory restriction import. Warnings derive from drawn_polygon(), so they
+  # update after draws, edits, drags, imports, resizes, and rotations. Hiding
+  # the overlay never suppresses the warning.
+  restriction_zones <- restriction_tools_server(input, output, session, drawn_polygon)
+
   # --- Observer for Clear Polygon Button ---
   observeEvent(input$clear_polygon, {
     drawn_polygon(NULL)
@@ -2392,6 +2408,7 @@ server <- function(input, output, session) {
           "Satellite", "Street Map", "DEA Low Tide", "DEA High Tide",
           "DEA Intertidal Extent (2024)"
         ),
+        overlayGroups = c(restriction_group),
         options = layersControlOptions(collapsed = FALSE)
       ) %>%
       addControl(
@@ -2416,6 +2433,13 @@ server <- function(input, output, session) {
               event.name === 'DEA Intertidal Extent (2024)' ? '' : 'none';
           });
         }"
+      ) %>%
+      leaflet::addMeasure(
+        position = "topright",
+        primaryLengthUnit = "meters",
+        secondaryLengthUnit = "kilometers",
+        primaryAreaUnit = "sqmeters",
+        secondaryAreaUnit = "hectares"
       ) %>%
       leaflet.extras::addDrawToolbar(
         targetGroup = "drawn_poly",
