@@ -1,0 +1,20 @@
+# R and RStudio session files
+.Rproj.user/
+.Rhistory
+.RData
+.Ruserdata
+
+# Local configuration and deployment records
+.Renviron
+.env
+.env.*
+rsconnect/
+
+# Local survey data and imagery
+/test_data/
+/offline_basemap_version/global_quarterly_2026q2_mosaic/
+/offline_basemap_version.zip
+
+# Operating system files
+Thumbs.db
+.DS_Store
