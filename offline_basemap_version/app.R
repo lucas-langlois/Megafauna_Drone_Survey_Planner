@@ -46,7 +46,6 @@ library(leaflet.extras) # For draw tools
 library(zip)       # For KMZ creation
 
 source("local_basemap.R", local = TRUE)
-source("planning_tools.R", local = TRUE)
 
 # Digital Earth Australia OGC Web Map Service. The tidal-composite layer's
 # default time is the latest published annual composite.
@@ -66,7 +65,7 @@ online_basemap_groups <- c(
   "DEA Intertidal Extent (2024)"
 )
 local_basemap_group <- "Local GeoTIFF"
-transect_length_limit_m <- 1400
+transect_length_limit_m <- 1800
 
 # ==============================================================================
 # User Interface (UI)
@@ -263,7 +262,6 @@ ui <- fluidPage(
         tags$p(class = "help-block",
           "Measurements are separate from the survey area and mission calculations. Finish or delete a measurement with the control's own options; this never deletes the survey area. The ruler works offline once the app has loaded.")
       ),
-      restriction_tools_ui(),
       tags$br(), tags$br(),
 
       # --- Flight Settings ---
@@ -316,7 +314,7 @@ ui <- fluidPage(
       tags$small("0 m places adjacent footprints edge-to-edge (0% sidelap). A larger gap creates negative sidelap."),
       checkboxInput(
         "trim_transect_length",
-        "Trim oversized transects to 1.4 km",
+        "Trim oversized transects to 1.8 km",
         value = FALSE
       ),
       tags$small(
@@ -1504,7 +1502,7 @@ write_plan_summary_html <- function(file, plan_data) {
 <style>
 :root{--navy:#123047;--teal:#16857b;--orange:#e27a16;--red:#c7352b;--ink:#17232d;--muted:#60717e;--line:#d8e1e7;--paper:#fff;--wash:#f3f7f9}*{box-sizing:border-box}body{margin:0;color:var(--ink);background:var(--wash);font:15px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}header{padding:28px clamp(18px,4vw,54px);color:#fff;background:linear-gradient(125deg,var(--navy),#155f78)}header h1{margin:0 0 5px;font-size:clamp(25px,4vw,38px)}header p{margin:0;opacity:.88}main{max-width:1500px;margin:auto;padding:22px}.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(165px,1fr));gap:12px;margin-bottom:18px}.card,.panel{background:var(--paper);border:1px solid var(--line);border-radius:12px;box-shadow:0 2px 9px #18394d10}.card{padding:15px 17px}.label{color:var(--muted);font-size:12px;font-weight:700;letter-spacing:.055em;text-transform:uppercase}.value{margin-top:4px;color:var(--navy);font-size:25px;font-weight:760}.sub{margin-top:2px;color:var(--muted);font-size:12px}.layout{display:grid;grid-template-columns:minmax(0,2.35fr) minmax(280px,1fr);gap:16px}.panel{padding:16px;margin-bottom:16px}h2{margin:0 0 11px;font-size:19px}.toolbar{display:flex;flex-wrap:wrap;gap:13px;margin-bottom:10px;color:var(--muted);font-size:13px}.toolbar label{display:flex;gap:5px;align-items:center}button{border:1px solid #b8c7d0;border-radius:7px;padding:6px 10px;background:#fff;cursor:pointer}#map{width:100%;height:min(68vh,720px);min-height:430px;display:block;border:1px solid #c9d5dc;border-radius:8px;background:#edf3f4;cursor:grab;touch-action:none}.aoi{fill:#1570a618;stroke:#1570a6;stroke-width:2;vector-effect:non-scaling-stroke}.route{fill:none;stroke:#8b99a2;stroke-width:1.2;stroke-dasharray:5 4;vector-effect:non-scaling-stroke}.transect{stroke:var(--orange);stroke-width:2.6;vector-effect:non-scaling-stroke}.footprint{fill:#2e9b7238;stroke:#16857b;stroke-width:.55;vector-effect:non-scaling-stroke}.photo{fill:var(--red);stroke:#fff;stroke-width:.6;vector-effect:non-scaling-stroke}.start{fill:var(--red);stroke:#fff;stroke-width:2;vector-effect:non-scaling-stroke}.end-label{fill:var(--navy);font-weight:800;font-size:13px;paint-order:stroke;stroke:#fff;stroke-width:3px;vector-effect:non-scaling-stroke}.legend{display:flex;flex-wrap:wrap;gap:13px;margin-top:8px;color:var(--muted);font-size:12px}.swatch{display:inline-block;width:13px;height:13px;margin-right:5px;border-radius:3px;vertical-align:-2px}.kv{display:grid;grid-template-columns:1fr auto;gap:7px 12px;padding:6px 0;border-bottom:1px solid #edf1f3}.kv span:first-child{color:var(--muted)}.note{color:#43545f;font-size:13px}@media(max-width:900px){.layout{grid-template-columns:1fr}#map{height:58vh}}@media print{body{background:#fff}main{max-width:none}.panel,.card{box-shadow:none}#map{height:520px}button{display:none}}
 </style></head><body><header><h1>Megafauna drone survey plan</h1><p id="subtitle"></p></header><main><section class="cards" id="cards"></section><div class="layout"><div><section class="panel"><h2>Planned survey route</h2><div class="toolbar"><label><input id="toggle-route" type="checkbox" checked> Route</label><label><input id="toggle-photos" type="checkbox" checked> Photo centres</label><label><input id="toggle-footprints" type="checkbox"> Image footprints</label><button id="reset-view">Reset view</button></div><svg id="map" role="img" aria-label="Map of planned survey transects and image footprints"></svg><div class="legend"><span><i class="swatch" style="background:#1570a633;border:1px solid #1570a6"></i>AOI</span><span><i class="swatch" style="background:#e27a16"></i>Transect</span><span><i class="swatch" style="background:#c7352b;border-radius:50%"></i>Photo centre</span><span><i class="swatch" style="background:#2e9b7260;border:1px solid #16857b"></i>Footprint</span></div><p class="note">Offline plan map. Scroll to zoom and drag to pan. Numbered labels mark transect ends.</p></section></div><aside><section class="panel"><h2>Mission settings</h2><div id="settings"></div></section><section class="panel"><h2>Planning notes</h2><div class="note" id="notes"></div></section></aside></div></main><script id="plan-data" type="application/json">__PAYLOAD__</script><script>
-const d=JSON.parse(document.getElementById("plan-data").textContent),m=d.metrics,fmt=(v,n=1)=>v==null?"—":Number(v).toFixed(n),trimNote=m.trim_transect_length_enabled?`${m.trimmed_transect_count} trimmed to ${fmt(m.transect_length_limit_m,0)} m maximum`:"off";document.getElementById("subtitle").textContent=`${d.drone_label} • generated ${d.generated_at} • ${d.transects.length} transects`;const cards=[["Area",fmt(m.area_ha,2)+" ha","survey polygon"],["Height",fmt(m.altitude_m,1)+" m","above home"],["Speed",fmt(m.speed_mps,1)+" m/s",m.optimisation_label],["Photo interval",fmt(m.photo_interval_s,2)+" s",fmt(m.forward_overlap_pct,1)+"% forward overlap"],["Footprint",fmt(m.footprint_width_m,1)+" × "+fmt(m.footprint_length_m,1)+" m","cross-track × along-track"],["Photos",m.photo_count,"planned centres"],["Transects",m.transect_count,fmt(m.longest_transect_m,0)+" m longest"],["Route",fmt(m.route_distance_km,2)+" km",fmt(m.flight_time_min,1)+" min • "+m.batteries+" battery estimate"]];document.getElementById("cards").innerHTML=cards.map(c=>`<article class="card"><div class="label">${c[0]}</div><div class="value">${c[1]}</div><div class="sub">${c[2]}</div></article>`).join("");document.getElementById("settings").innerHTML=[["Drone",d.drone_label],["GSD",fmt(m.gsd_cm,2)+" cm/px"],["Transect direction",fmt(m.transect_angle_deg,0)+"° from north"],["Mission start",m.start_corner],["Route order",m.reverse_order?"Reversed":"Standard"],["Transects",m.transect_count],["Longest exported transect",fmt(m.longest_transect_m,0)+" m"],...(m.trim_transect_length_enabled?[["Original longest transect",fmt(m.original_longest_transect_m,0)+" m"]]:[]),["1.4 km trimming",trimNote],["Capture optimisation",m.optimisation_label],["Expected photos",m.photo_count]].map(x=>`<div class="kv"><span>${x[0]}</span><span>${x[1]}</span></div>`).join("");document.getElementById("notes").innerHTML=`<p>The route and photo centres are generated from the selected AOI and current planner settings. The first image is triggered as each transect begins; interval capture is disabled on connector legs.</p><p>${m.trim_transect_length_enabled?`Oversized transects were trimmed around their midpoints; ${m.trimmed_transect_count} line(s) were shortened, reducing coverage at their ends while retaining centred coverage.`:"Transect trimming is off."}</p><p>Flight time is route distance divided by planned speed and excludes take-off, landing, turns, acceleration, wind and operational delays. Battery count uses ${m.battery_minutes} usable minutes per battery.</p><p>Review the exported route, home point, altitude reference, obstacles, lighting, shutter speed, wind and regulatory requirements before flight.</p>`;
+const d=JSON.parse(document.getElementById("plan-data").textContent),m=d.metrics,fmt=(v,n=1)=>v==null?"—":Number(v).toFixed(n),trimNote=m.trim_transect_length_enabled?`${m.trimmed_transect_count} trimmed to ${fmt(m.transect_length_limit_m,0)} m maximum`:"off";document.getElementById("subtitle").textContent=`${d.drone_label} • generated ${d.generated_at} • ${d.transects.length} transects`;const cards=[["Area",fmt(m.area_ha,2)+" ha","survey polygon"],["Height",fmt(m.altitude_m,1)+" m","above home"],["Speed",fmt(m.speed_mps,1)+" m/s",m.optimisation_label],["Photo interval",fmt(m.photo_interval_s,2)+" s",fmt(m.forward_overlap_pct,1)+"% forward overlap"],["Footprint",fmt(m.footprint_width_m,1)+" × "+fmt(m.footprint_length_m,1)+" m","cross-track × along-track"],["Photos",m.photo_count,"planned centres"],["Transects",m.transect_count,fmt(m.longest_transect_m,0)+" m longest"],["Route",fmt(m.route_distance_km,2)+" km",fmt(m.flight_time_min,1)+" min • "+m.batteries+" battery estimate"]];document.getElementById("cards").innerHTML=cards.map(c=>`<article class="card"><div class="label">${c[0]}</div><div class="value">${c[1]}</div><div class="sub">${c[2]}</div></article>`).join("");document.getElementById("settings").innerHTML=[["Drone",d.drone_label],["GSD",fmt(m.gsd_cm,2)+" cm/px"],["Transect direction",fmt(m.transect_angle_deg,0)+"° from north"],["Mission start",m.start_corner],["Route order",m.reverse_order?"Reversed":"Standard"],["Transects",m.transect_count],["Longest exported transect",fmt(m.longest_transect_m,0)+" m"],...(m.trim_transect_length_enabled?[["Original longest transect",fmt(m.original_longest_transect_m,0)+" m"]]:[]),["1.8 km trimming",trimNote],["Capture optimisation",m.optimisation_label],["Expected photos",m.photo_count]].map(x=>`<div class="kv"><span>${x[0]}</span><span>${x[1]}</span></div>`).join("");document.getElementById("notes").innerHTML=`<p>The route and photo centres are generated from the selected AOI and current planner settings. The first image is triggered as each transect begins; interval capture is disabled on connector legs.</p><p>${m.trim_transect_length_enabled?`Oversized transects were trimmed around their midpoints; ${m.trimmed_transect_count} line(s) were shortened, reducing coverage at their ends while retaining centred coverage.`:"Transect trimming is off."}</p><p>Flight time is route distance divided by planned speed and excludes take-off, landing, turns, acceleration, wind and operational delays. Battery count uses ${m.battery_minutes} usable minutes per battery.</p><p>Review the exported route, home point, altitude reference, obstacles, lighting, shutter speed, wind and regulatory requirements before flight.</p>`;
 const R=6378137,all=[...d.aoi,...d.transects.flat(),...d.photo_points.map(p=>p.center)],lon0=all.reduce((s,p)=>s+p[0],0)/all.length,lat0=all.reduce((s,p)=>s+p[1],0)/all.length,rad=Math.PI/180,xy=p=>[(p[0]-lon0)*rad*R*Math.cos(lat0*rad),(p[1]-lat0)*rad*R],aoi=d.aoi.map(xy),lines=d.transects.map(t=>t.map(xy)),photos=d.photo_points.map(p=>({...p,xy:xy(p.center)})),points=[...aoi,...lines.flat()],xs=points.map(p=>p[0]),ys=points.map(p=>-p[1]),minX=Math.min(...xs),maxX=Math.max(...xs),minY=Math.min(...ys),maxY=Math.max(...ys),pad=Math.max(maxX-minX,maxY-minY)*.05,home={x:minX-pad,y:minY-pad,w:maxX-minX+2*pad,h:maxY-minY+2*pad};let view={...home};const svg=document.getElementById("map"),ns="http://www.w3.org/2000/svg",setView=()=>svg.setAttribute("viewBox",`${view.x} ${view.y} ${view.w} ${view.h}`);setView();const group=id=>{const g=document.createElementNS(ns,"g");g.id=id;svg.appendChild(g);return g},aoiG=group("aoi"),routeG=group("route"),fpG=group("footprints"),photoG=group("photos");const poly=(g,pts,cls)=>{const e=document.createElementNS(ns,"polygon");e.setAttribute("points",pts.map(p=>`${p[0]},${-p[1]}`).join(" "));e.setAttribute("class",cls);g.appendChild(e)};poly(aoiG,aoi,"aoi");const routePts=[];lines.forEach((line,i)=>{routePts.push(...line);const e=document.createElementNS(ns,"line");e.setAttribute("x1",line[0][0]);e.setAttribute("y1",-line[0][1]);e.setAttribute("x2",line.at(-1)[0]);e.setAttribute("y2",-line.at(-1)[1]);e.setAttribute("class","transect");routeG.appendChild(e);const t=document.createElementNS(ns,"text");t.setAttribute("x",line.at(-1)[0]);t.setAttribute("y",-line.at(-1)[1]);t.setAttribute("class","end-label");t.textContent=String(i+1);routeG.appendChild(t)});const route=document.createElementNS(ns,"polyline");route.setAttribute("points",routePts.map(p=>`${p[0]},${-p[1]}`).join(" "));route.setAttribute("class","route");routeG.insertBefore(route,routeG.firstChild);const s=document.createElementNS(ns,"circle");s.setAttribute("cx",lines[0][0][0]);s.setAttribute("cy",-lines[0][0][1]);s.setAttribute("r",Math.max(home.w,home.h)*.007);s.setAttribute("class","start");routeG.appendChild(s);photos.forEach(p=>{const th=p.bearing*rad,u=[Math.sin(th),Math.cos(th)],v=[Math.cos(th),-Math.sin(th)],hw=m.footprint_width_m/2,hh=m.footprint_length_m/2,c=p.xy,corners=[[-hh,-hw],[hh,-hw],[hh,hw],[-hh,hw]].map(q=>[c[0]+q[0]*u[0]+q[1]*v[0],c[1]+q[0]*u[1]+q[1]*v[1]]);poly(fpG,corners,"footprint");const e=document.createElementNS(ns,"circle");e.setAttribute("cx",c[0]);e.setAttribute("cy",-c[1]);e.setAttribute("r",Math.max(home.w,home.h)*.0018);e.setAttribute("class","photo");photoG.appendChild(e)});fpG.style.display="none";document.getElementById("toggle-route").onchange=e=>routeG.style.display=e.target.checked?"":"none";document.getElementById("toggle-photos").onchange=e=>photoG.style.display=e.target.checked?"":"none";document.getElementById("toggle-footprints").onchange=e=>fpG.style.display=e.target.checked?"":"none";document.getElementById("reset-view").onclick=()=>{view={...home};setView()};svg.addEventListener("wheel",e=>{e.preventDefault();const r=svg.getBoundingClientRect(),mx=view.x+(e.clientX-r.left)/r.width*view.w,my=view.y+(e.clientY-r.top)/r.height*view.h,f=e.deltaY>0?1.18:.84;view.x=mx-(mx-view.x)*f;view.y=my-(my-view.y)*f;view.w*=f;view.h*=f;setView()},{passive:false});let drag=null;svg.addEventListener("pointerdown",e=>{drag={x:e.clientX,y:e.clientY,v:{...view}};svg.setPointerCapture(e.pointerId)});svg.addEventListener("pointermove",e=>{if(!drag)return;const r=svg.getBoundingClientRect();view.x=drag.v.x-(e.clientX-drag.x)/r.width*drag.v.w;view.y=drag.v.y-(e.clientY-drag.y)/r.height*drag.v.h;setView()});svg.addEventListener("pointerup",()=>drag=null);
 </script></body></html>'
   writeLines(sub("__PAYLOAD__", payload, template, fixed = TRUE), file,
@@ -1811,7 +1809,6 @@ server <- function(input, output, session) {
       removeLayersControl() %>%
       addLayersControl(
         baseGroups = groups,
-        overlayGroups = c(restriction_group),
         options = layersControlOptions(collapsed = FALSE)
       )
   }
@@ -2297,12 +2294,6 @@ server <- function(input, output, session) {
     }, delay = 0.3)
   }
 
-  # Advisory restriction import. Warnings derive from drawn_polygon(), so they
-  # update after draws, edits, drags, imports, resizes, and rotations. Hiding
-  # the overlay never suppresses the warning. The import is session-local and
-  # works offline.
-  restriction_zones <- restriction_tools_server(input, output, session, drawn_polygon)
-
   # --- Observer for Clear Polygon Button ---
   observeEvent(input$clear_polygon, {
     drawn_polygon(NULL)
@@ -2413,7 +2404,6 @@ server <- function(input, output, session) {
       setView(lng = 146.8169, lat = -19.2590, zoom = 7) %>% # Center on Townsville, showing entire QLD coast
       addLayersControl(
         baseGroups = online_basemap_groups,
-        overlayGroups = c(restriction_group),
         options = layersControlOptions(collapsed = FALSE)
       ) %>%
       addControl(
@@ -2862,7 +2852,7 @@ server <- function(input, output, session) {
       showNotification(
         sprintf(
           paste0(
-            "Warning: %d transect%s exceed%s 1.4 km (longest %.2f km). ",
+            "Warning: %d transect%s exceed%s 1.8 km (longest %.2f km). ",
             "%s will continue; assess line of sight or enable trimming."
           ),
           length_status$oversized_count,
@@ -3359,7 +3349,7 @@ server <- function(input, output, session) {
       sprintf(
         paste0(
           "<div class='alert alert-warning' style='margin:10px 0 0;'>",
-          "<strong>Line-of-sight warning:</strong> %d transect%s exceed%s 1.4 km ",
+          "<strong>Line-of-sight warning:</strong> %d transect%s exceed%s 1.8 km ",
           "(longest %.2f km). Exports remain available. Enable trimming to shorten them.",
           "</div>"
         ),
@@ -3391,7 +3381,7 @@ server <- function(input, output, session) {
           if (!is.null(plan_metrics) && isTRUE(plan_metrics$trim_transect_length_enabled)) {
             metric_row("Original longest transect", sprintf("%.0f m", plan_metrics$original_longest_transect_m))
           } else "",
-          metric_row("Trimmed transects", if (!is.null(plan_metrics)) sprintf("%d%s", plan_metrics$trimmed_transect_count, if (isTRUE(plan_metrics$trim_transect_length_enabled)) " (1.4 km maximum)" else " (off)") else "N/A"),
+          metric_row("Trimmed transects", if (!is.null(plan_metrics)) sprintf("%d%s", plan_metrics$trimmed_transect_count, if (isTRUE(plan_metrics$trim_transect_length_enabled)) " (1.8 km maximum)" else " (off)") else "N/A"),
           metric_row("Route distance", if (!is.na(flight_distance_km)) sprintf("%.2f km", flight_distance_km) else "N/A"),
           metric_row("Route time", if (!is.na(flight_time_min)) sprintf("%.1f min", flight_time_min) else "N/A"),
           metric_row(
@@ -3418,7 +3408,7 @@ server <- function(input, output, session) {
       if (plan_data$metrics$oversized_transect_count > 0) {
         showNotification(
           sprintf(
-            "Warning: %d transect%s exceed%s 1.4 km. Summary export will continue.",
+            "Warning: %d transect%s exceed%s 1.8 km. Summary export will continue.",
             plan_data$metrics$oversized_transect_count,
             if (plan_data$metrics$oversized_transect_count == 1L) "" else "s",
             if (plan_data$metrics$oversized_transect_count == 1L) "s" else ""
@@ -3716,7 +3706,7 @@ server <- function(input, output, session) {
               if (length_status$oversized_count > 0) {
                 sprintf(
                   paste0(
-                    "off; WARNING: %d transect%s exceed%s 1.4 km ",
+                    "off; WARNING: %d transect%s exceed%s 1.8 km ",
                     "(longest %.2f km). Export was allowed; assess line of sight."
                   ),
                   length_status$oversized_count,
@@ -3725,7 +3715,7 @@ server <- function(input, output, session) {
                   length_status$longest_m / 1000
                 )
               } else {
-                "off; no transect exceeds 1.4 km."
+                "off; no transect exceeds 1.8 km."
               }
             }
           ),

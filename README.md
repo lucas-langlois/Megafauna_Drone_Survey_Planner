@@ -42,47 +42,55 @@ Finish or delete a measurement with the control itself; that never deletes
 the survey area. While drawing the polygon, the draw tooltip also shows
 metric area. The installed draw version has no per-edge length readout.
 
-## Restriction zones (advisory import, no live feed)
+## Stationary pilot radius
 
-The planner does not bundle a live nationwide no-fly feed. Under
-**No-fly / restriction zones**, import your own GeoJSON or KML polygons
-(up to 2000 features). They draw in a toggleable red overlay. The panel
-warns when the survey area intersects an imported boundary, including
-boundary contact, after draws, edits, drags, imports, resizes, and
-rotations. Hiding the overlay does not turn off warnings. Planning and
-export stay available. Three states are distinct: no data loaded, no
-overlap (not permission to fly), and overlap warning. A failed check
-shows as unavailable, not as zero overlap.
+Enable **Stationary pilot: limit route to pilot radius**, enter the maximum
+distance in metres (900 m by default), then select **Place / move pilot on map**
+and click the pilot's location. A purple boundary shows the selected radius.
+Repeat placement to move the pilot, or cancel placement to keep the current point.
 
-To check a plan in OK2Fly: use **Export AOI as KML**, open
-[OK2Fly](https://ok2fly.com.au/), choose Load Geometry File, select the
-KML, then run its flight check. OK2Fly Web geometry tools need a
-subscription. Its airspace data is advisory and not CASR Part 175
-approved; its terms prohibit scraping, reverse engineering, and
-derivative reuse, so there is no documented live integration here.
+Survey lines are clipped to this boundary, including the extra coverage beyond
+the survey polygon. Lines outside it are removed. The map, photo centres,
+mission metrics, DJI and Litchi route exports, and HTML summary use the clipped
+route. The original survey polygon and its KML export remain unchanged. Coverage
+may be reduced, and image footprints can extend beyond the boundary. Click
+**Remove pilot trim** or disable the option to restore the route without the
+pilot-radius limit. The existing 1.8 km trimming
+option can be used alongside the radius limit.
 
-Data-source findings, October 2026:
+The radius is a planning aid; confirm actual visual line of sight and visibility
+of the complete route. It does not set the aircraft's home or takeoff point.
 
-- OK2Fly publishes user-track/polygon GeoJSON/KML import and export in
-  its docs. It does not publish a restriction-layer API or boundary
-  download.
-- CASA does not host GIS restriction downloads. It points to verified
-  [drone safety apps](https://www.casa.gov.au/knowyourdrone/drone-safety-apps).
-- Airservices [Shape Files](https://data.airservicesaustralia.com/data-product/shape-files)
-  cost $5,950 AUD per year plus royalties and need a subscription.
-  [Digital Facilities Maps](https://data.airservicesaustralia.com/data-product/digital-facilities-maps)
-  are GeoJSON but limited to CASA RPAS Digital Platform participants on
-  a trial basis.
-- The Department of Infrastructure
-  [Drone Rule Digitisation](https://www.drones.gov.au/policies-and-programs/initiatives/drone-rule-digitisation)
-  map covers parks and correctional facilities (7,610 areas, 15
-  authorities, first release February 2024). Its open
-  `Drone_Rules_Australia_csv` endpoint is an attribute table with no
-  geometry, correctional points date to a 2012 digitisation, and the
-  department notes the API is still changing. There is no single stable
-  polygon download in that set that this planner can bundle as
-  authoritative no-fly zones.
+## Overlap in the plan summary
 
-Get importable boundaries from the Local Drone Rules map, the relevant
-council or parks open-data portal, or your own advisory buffers, and
-confirm currency and permit conditions before flying.
+The exported HTML plan summary records forward overlap and sidelap as
+percentages. Forward overlap is the selected target for consecutive images along
+a transect.
+Sidelap describes adjacent image swaths: 0% means edge-to-edge footprints;
+negative values indicate a gap between swaths. These values use the selected
+camera geometry and planned flight height.
+
+## Export names and folders
+
+**Download complete plan** saves one ZIP containing the DJI waypoint KMZ,
+Litchi bundle (CSV, native .lchz plan and import notes), HTML plan summary,
+original survey-area KML, and a README explaining the files. Extract the ZIP
+before using its contents. The included instructions specify transferring the
+DJI and extracted Litchi plans to the drone RC via SD card.
+
+Enter an optional **Export name** to name all exports, including files inside
+the Litchi bundle. The app adds the drone model, file type and timestamp.
+Leave the name empty to use the default filenames.
+
+Where the browser supports folder access (such as desktop Chrome and Edge),
+**Choose export folder** lets you grant access to a local folder for this tab's
+session. Exports then save there directly. Existing files receive a numbered
+suffix rather than being overwritten. **Use browser downloads** restores normal
+downloads. Starting fresh also clears the folder selection.
+
+Safari, Firefox and other browsers without folder access use standard downloads
+with the same custom names. Enable the browser's **Ask where to save** download
+setting to choose the destination for each export. The app cannot force that
+setting or access a local folder without browser permission.
+
+Deployment must include `app.R`, `pilot_radius.R`, and `www/export-downloads.js`.

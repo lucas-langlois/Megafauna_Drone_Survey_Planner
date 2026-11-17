@@ -36,7 +36,7 @@ library(shinyjs)   # For enabling/disabling buttons
 library(leaflet.extras) # For draw tools
 library(zip)       # For KMZ creation
 
-source("planning_tools.R", local = TRUE)
+source("pilot_radius.R", local = TRUE)
 
 # Digital Earth Australia OGC Web Map Service. The tidal-composite layer's
 # default time is the latest published annual composite.
@@ -51,13 +51,23 @@ dea_attribution <- paste0(
   "Digital Earth Australia &copy; Commonwealth of Australia ",
   "(Geoscience Australia), CC BY 4.0"
 )
-transect_length_limit_m <- 1400
+transect_length_limit_m <- 1800
+
+safe_export_name <- function(name) {
+  if (is.null(name) || !nzchar(trimws(name))) return("")
+  name <- gsub("\\", "_", trimws(name), fixed = TRUE)
+  name <- gsub('[<>:"/|?*[:cntrl:]]', "_", name)
+  name <- gsub("[[:space:]]+", "_", name)
+  name <- sub("[. ]+$", "", substr(name, 1, 80))
+  if (name %in% c("", ".", "..")) "" else name
+}
 
 # ==============================================================================
 # User Interface (UI)
 # ==============================================================================
 ui <- fluidPage(
   useShinyjs(),  # Enable shinyjs
+  tags$script(src = "export-downloads.js"),
   tags$head(tags$style(HTML("
     .mission-metrics-panel {
       padding: 10px 12px;
@@ -127,6 +137,12 @@ ui <- fluidPage(
     sidebarPanel(
       width = 4,
       h4("Mission Parameters"),
+      div(style = "display:flex;gap:8px;flex-wrap:wrap;",
+        actionButton("start_fresh", "Start fresh", icon = icon("refresh"),
+          title = "Clear the current plan and restore default settings"),
+        actionButton("clear_polygon", "Clear Polygon", icon = icon("trash"), class = "btn-danger")
+      ),
+      tags$p(class = "help-block", "Start fresh clears the current plan, pilot position and settings."),
       p("Draw a polygon on the map to define the megafauna survey area. You can also import a KML polygon."),
 
       # --- KML Import ---
@@ -136,7 +152,6 @@ ui <- fluidPage(
         "Import AOI or Previous Survey Plan (KML/KMZ)",
         accept = c(".kml", ".kmz")
       ),
-      downloadButton("download_kml", "Export AOI as KML", class = "btn-info"),
       tags$details(
         class = "aoi-resize-panel",
         tags$summary("Resize or rotate AOI"),
@@ -200,7 +215,6 @@ ui <- fluidPage(
         tags$p(class = "help-block",
           "Measurements are separate from the survey area and mission calculations. Finish or delete a measurement with the control's own options; this never deletes the survey area.")
       ),
-      restriction_tools_ui(),
       tags$br(), tags$br(),
 
       # --- Flight Settings ---
@@ -239,7 +253,7 @@ ui <- fluidPage(
       ),
       uiOutput("camera_model_note"),
       p(tags$b("Survey:"), "Megafauna (80% forward overlap / footprints edge-to-edge)"),
-      sliderInput("front_overlap", "Front Overlap (%):", min = 0, max = 95, value = 80, step = 5),
+      sliderInput("front_overlap", "Forward Overlap (%):", min = 0, max = 95, value = 80, step = 5),
       tags$small(
         "Maximum-efficiency capture is used automatically: the fastest feasible flight speed and calculated photo interval preserve the requested forward overlap."
       ),
@@ -253,11 +267,21 @@ ui <- fluidPage(
       tags$small("0 m places adjacent footprints edge-to-edge (0% sidelap). A larger gap creates negative sidelap."),
       checkboxInput(
         "trim_transect_length",
-        "Trim oversized transects to 1.4 km",
+        "Trim oversized transects to 1.8 km",
         value = FALSE
       ),
       tags$small(
         "Longer lines are shortened around their midpoint. The map shows the resulting survey coverage; confirm actual visual line of sight from the pilot position."
+      ),
+      checkboxInput("limit_pilot_radius", "Stationary pilot: limit route to pilot radius", value = FALSE),
+      conditionalPanel(
+        condition = "input.limit_pilot_radius",
+        numericInput("pilot_distance_m", "Maximum Distance from Pilot (meters):", value = 900, min = 1, step = 1),
+        actionButton("place_pilot", "Place / move pilot on map", icon = icon("map-marker")),
+        actionButton("cancel_place_pilot", "Cancel placement"),
+        actionButton("remove_pilot_trim", "Remove pilot trim", icon = icon("undo")),
+        textOutput("pilot_status"),
+        tags$small("Click Place / move pilot, then click the map. Transects outside the radius are removed or shortened, reducing coverage. This distance limit is a planning aid; confirm actual visual line of sight and visibility of the complete route.")
       ),
 
       # --- Transect Direction ---
@@ -302,19 +326,33 @@ ui <- fluidPage(
 
       # --- Action Buttons ---
       tags$hr(),
-      actionButton("clear_polygon", "Clear Polygon", icon = icon("trash"), class = "btn-danger"),
-      downloadButton("download_kmz", "Export DJI Waypoint KMZ", class = "btn-primary"),
-      downloadButton("download_litchi_bundle", "Download Litchi Plan Bundle", class = "btn-success"),
-      downloadButton("download_plan_summary", "Download Plan Summary HTML", class = "btn-info"),
+      h4("Export settings"),
+      textInput("export_name", "Export name (optional):", value = "",
+        placeholder = "e.g. Bowen_Site01"),
+      tags$p(class = "help-block", "Applied to all exports and files inside the Litchi bundle. File type, drone model and timestamp are added automatically."),
+      tags$button(id = "choose_export_folder", type = "button", class = "btn btn-default",
+        "Choose export folder"),
+      tags$button(id = "clear_export_folder", type = "button", class = "btn btn-default",
+        "Use browser downloads"),
+      tags$p(id = "export_folder_status", class = "help-block", role = "status",
+        `aria-live` = "polite", "Exports use your browser's download settings."),
+      tags$p(class = "help-block", "Folder selection depends on your browser. To choose a location for each export in other browsers, enable 'Ask where to save' in the browser's download settings."),
+      downloadButton("download_complete_plan", "Download complete plan", class = "btn-primary"),
       tags$p(
         class = "help-block",
-        "ZIP bundle includes CSV, New Litchi Hub (.lchz), and import notes. Review the imported route and interval settings before flying."
+        "One ZIP includes the DJI KMZ, Litchi bundle, HTML plan summary, survey-area KML, and a README explaining each file."
       ),
 
       # --- Calculated Outputs ---
       tags$hr(),
       h4("Calculated Mission Metrics"),
-      div(class = "well mission-metrics-panel", htmlOutput("mission_summary"))
+      div(class = "well mission-metrics-panel", htmlOutput("mission_summary")),
+      tags$hr(),
+      tags$p(
+        class = "help-block",
+        tags$a("Check your planned flight in OK2Fly",
+          href = "https://ok2fly.com.au/", target = "_blank", rel = "noopener noreferrer")
+      )
     ),
 
     # --- Main Panel for the Map ---
@@ -1544,8 +1582,8 @@ write_plan_summary_html <- function(file, plan_data) {
 <style>
 :root{--navy:#123047;--teal:#16857b;--orange:#e27a16;--red:#c7352b;--ink:#17232d;--muted:#60717e;--line:#d8e1e7;--paper:#fff;--wash:#f3f7f9}*{box-sizing:border-box}body{margin:0;color:var(--ink);background:var(--wash);font:15px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}header{padding:28px clamp(18px,4vw,54px);color:#fff;background:linear-gradient(125deg,var(--navy),#155f78)}header h1{margin:0 0 5px;font-size:clamp(25px,4vw,38px)}header p{margin:0;opacity:.88}main{max-width:1500px;margin:auto;padding:22px}.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(165px,1fr));gap:12px;margin-bottom:18px}.card,.panel{background:var(--paper);border:1px solid var(--line);border-radius:12px;box-shadow:0 2px 9px #18394d10}.card{padding:15px 17px}.label{color:var(--muted);font-size:12px;font-weight:700;letter-spacing:.055em;text-transform:uppercase}.value{margin-top:4px;color:var(--navy);font-size:25px;font-weight:760}.sub{margin-top:2px;color:var(--muted);font-size:12px}.layout{display:grid;grid-template-columns:minmax(0,2.35fr) minmax(280px,1fr);gap:16px}.panel{padding:16px;margin-bottom:16px}h2{margin:0 0 11px;font-size:19px}.toolbar{display:flex;flex-wrap:wrap;gap:13px;margin-bottom:10px;color:var(--muted);font-size:13px}.toolbar label{display:flex;gap:5px;align-items:center}button{border:1px solid #b8c7d0;border-radius:7px;padding:6px 10px;background:#fff;cursor:pointer}#map{width:100%;height:min(68vh,720px);min-height:430px;display:block;border:1px solid #c9d5dc;border-radius:8px;background:#edf3f4;cursor:grab;touch-action:none}.aoi{fill:#1570a618;stroke:#1570a6;stroke-width:2;vector-effect:non-scaling-stroke}.route{fill:none;stroke:#8b99a2;stroke-width:1.2;stroke-dasharray:5 4;vector-effect:non-scaling-stroke}.transect{stroke:var(--orange);stroke-width:2.6;vector-effect:non-scaling-stroke}.footprint{fill:#2e9b7238;stroke:#16857b;stroke-width:.55;vector-effect:non-scaling-stroke}.photo{fill:var(--red);stroke:#fff;stroke-width:.6;vector-effect:non-scaling-stroke}.start{fill:var(--red);stroke:#fff;stroke-width:2;vector-effect:non-scaling-stroke}.end-label{fill:var(--navy);font-weight:800;font-size:13px;paint-order:stroke;stroke:#fff;stroke-width:3px;vector-effect:non-scaling-stroke}.legend{display:flex;flex-wrap:wrap;gap:13px;margin-top:8px;color:var(--muted);font-size:12px}.swatch{display:inline-block;width:13px;height:13px;margin-right:5px;border-radius:3px;vertical-align:-2px}.kv{display:grid;grid-template-columns:1fr auto;gap:7px 12px;padding:6px 0;border-bottom:1px solid #edf1f3}.kv span:first-child{color:var(--muted)}.note{color:#43545f;font-size:13px}@media(max-width:900px){.layout{grid-template-columns:1fr}#map{height:58vh}}@media print{body{background:#fff}main{max-width:none}.panel,.card{box-shadow:none}#map{height:520px}button{display:none}}
 </style></head><body><header><h1>Megafauna drone survey plan</h1><p id="subtitle"></p></header><main><section class="cards" id="cards"></section><div class="layout"><div><section class="panel"><h2>Planned survey route</h2><div class="toolbar"><label><input id="toggle-route" type="checkbox" checked> Route</label><label><input id="toggle-photos" type="checkbox" checked> Photo centres</label><label><input id="toggle-footprints" type="checkbox"> Image footprints</label><button id="reset-view">Reset view</button></div><svg id="map" role="img" aria-label="Map of planned survey transects and image footprints"></svg><div class="legend"><span><i class="swatch" style="background:#1570a633;border:1px solid #1570a6"></i>AOI</span><span><i class="swatch" style="background:#e27a16"></i>Transect</span><span><i class="swatch" style="background:#c7352b;border-radius:50%"></i>Photo centre</span><span><i class="swatch" style="background:#2e9b7260;border:1px solid #16857b"></i>Footprint</span></div><p class="note">Offline plan map. Scroll to zoom and drag to pan. Numbered labels mark transect ends.</p></section></div><aside><section class="panel"><h2>Mission settings</h2><div id="settings"></div></section><section class="panel"><h2>Planning notes</h2><div class="note" id="notes"></div></section></aside></div></main><script id="plan-data" type="application/json">__PAYLOAD__</script><script>
-const d=JSON.parse(document.getElementById("plan-data").textContent),m=d.metrics,fmt=(v,n=1)=>v==null?"—":Number(v).toFixed(n),trimStatus=m.trim_transect_length_enabled?(m.trimmed_transect_count>0?`${m.trimmed_transect_count} oversized ${m.trimmed_transect_count===1?"transect":"transects"} trimmed to ${fmt(m.transect_length_limit_km,2)} km; coverage reduced.`:`Enabled; no transects required trimming.`):"Off";document.getElementById("subtitle").textContent=`${d.drone_label} • generated ${d.generated_at} • ${d.transects.length} transects`;const cards=[["Area",fmt(m.area_ha,2)+" ha","survey polygon"],["Height",fmt(m.altitude_m,1)+" m","above home"],["Speed",fmt(m.speed_mps,1)+" m/s",m.optimisation_label],["Photo interval",fmt(m.photo_interval_s,2)+" s",fmt(m.forward_overlap_pct,1)+"% forward overlap"],["Footprint",fmt(m.footprint_width_m,1)+" × "+fmt(m.footprint_length_m,1)+" m","cross-track × along-track"],["Footprint gap",fmt(m.footprint_gap_m,1)+" m","between adjacent footprints"],["Longest transect",fmt(m.longest_transect_km,2)+" km",trimStatus],["Photos",m.photo_count,"planned centres"],["Route",fmt(m.route_distance_km,2)+" km",fmt(m.flight_time_min,1)+" min • "+m.batteries+" battery estimate"]];document.getElementById("cards").innerHTML=cards.map(c=>`<article class="card"><div class="label">${c[0]}</div><div class="value">${c[1]}</div><div class="sub">${c[2]}</div></article>`).join("");document.getElementById("settings").innerHTML=[["Drone",d.drone_label],["GSD",fmt(m.gsd_cm,2)+" cm/px"],["Transect direction",fmt(m.transect_angle_deg,0)+"° from north"],["Mission start",m.start_corner],["Route order",m.reverse_order?"Reversed":"Standard"],["Transects",m.transect_count],["1.4 km trimming",trimStatus],["Capture optimisation",m.optimisation_label],["Expected photos",m.photo_count]].map(x=>`<div class="kv"><span>${x[0]}</span><span>${x[1]}</span></div>`).join("");document.getElementById("notes").innerHTML=`<p>The route and photo centres are generated from the selected AOI and current planner settings. The first image is triggered as each transect begins; interval capture is disabled on connector legs.</p><p>${trimStatus}</p><p>Flight time is route distance divided by planned speed and excludes take-off, landing, turns, acceleration, wind and operational delays. Battery count uses ${m.battery_minutes} usable minutes per battery.</p><p>Review the exported route, home point, altitude reference, obstacles, lighting, shutter speed, wind and regulatory requirements before flight.</p>`;
-const R=6378137,all=[...d.aoi,...d.transects.flat(),...d.photo_points.map(p=>p.center)],lon0=all.reduce((s,p)=>s+p[0],0)/all.length,lat0=all.reduce((s,p)=>s+p[1],0)/all.length,rad=Math.PI/180,xy=p=>[(p[0]-lon0)*rad*R*Math.cos(lat0*rad),(p[1]-lat0)*rad*R],aoi=d.aoi.map(xy),lines=d.transects.map(t=>t.map(xy)),photos=d.photo_points.map(p=>({...p,xy:xy(p.center)})),points=[...aoi,...lines.flat()],xs=points.map(p=>p[0]),ys=points.map(p=>-p[1]),minX=Math.min(...xs),maxX=Math.max(...xs),minY=Math.min(...ys),maxY=Math.max(...ys),pad=Math.max(maxX-minX,maxY-minY)*.05,home={x:minX-pad,y:minY-pad,w:maxX-minX+2*pad,h:maxY-minY+2*pad};let view={...home};const svg=document.getElementById("map"),ns="http://www.w3.org/2000/svg",setView=()=>svg.setAttribute("viewBox",`${view.x} ${view.y} ${view.w} ${view.h}`);setView();const group=id=>{const g=document.createElementNS(ns,"g");g.id=id;svg.appendChild(g);return g},aoiG=group("aoi"),routeG=group("route"),fpG=group("footprints"),photoG=group("photos");const poly=(g,pts,cls)=>{const e=document.createElementNS(ns,"polygon");e.setAttribute("points",pts.map(p=>`${p[0]},${-p[1]}`).join(" "));e.setAttribute("class",cls);g.appendChild(e)};poly(aoiG,aoi,"aoi");const routePts=[];lines.forEach((line,i)=>{routePts.push(...line);const e=document.createElementNS(ns,"line");e.setAttribute("x1",line[0][0]);e.setAttribute("y1",-line[0][1]);e.setAttribute("x2",line.at(-1)[0]);e.setAttribute("y2",-line.at(-1)[1]);e.setAttribute("class","transect");routeG.appendChild(e);const t=document.createElementNS(ns,"text");t.setAttribute("x",line.at(-1)[0]);t.setAttribute("y",-line.at(-1)[1]);t.setAttribute("class","end-label");t.textContent=String(i+1);routeG.appendChild(t)});const route=document.createElementNS(ns,"polyline");route.setAttribute("points",routePts.map(p=>`${p[0]},${-p[1]}`).join(" "));route.setAttribute("class","route");routeG.insertBefore(route,routeG.firstChild);const s=document.createElementNS(ns,"circle");s.setAttribute("cx",lines[0][0][0]);s.setAttribute("cy",-lines[0][0][1]);s.setAttribute("r",Math.max(home.w,home.h)*.007);s.setAttribute("class","start");routeG.appendChild(s);photos.forEach(p=>{const th=p.bearing*rad,u=[Math.sin(th),Math.cos(th)],v=[Math.cos(th),-Math.sin(th)],hw=m.footprint_width_m/2,hh=m.footprint_length_m/2,c=p.xy,corners=[[-hh,-hw],[hh,-hw],[hh,hw],[-hh,hw]].map(q=>[c[0]+q[0]*u[0]+q[1]*v[0],c[1]+q[0]*u[1]+q[1]*v[1]]);poly(fpG,corners,"footprint");const e=document.createElementNS(ns,"circle");e.setAttribute("cx",c[0]);e.setAttribute("cy",-c[1]);e.setAttribute("r",Math.max(home.w,home.h)*.0018);e.setAttribute("class","photo");photoG.appendChild(e)});fpG.style.display="none";document.getElementById("toggle-route").onchange=e=>routeG.style.display=e.target.checked?"":"none";document.getElementById("toggle-photos").onchange=e=>photoG.style.display=e.target.checked?"":"none";document.getElementById("toggle-footprints").onchange=e=>fpG.style.display=e.target.checked?"":"none";document.getElementById("reset-view").onclick=()=>{view={...home};setView()};svg.addEventListener("wheel",e=>{e.preventDefault();const r=svg.getBoundingClientRect(),mx=view.x+(e.clientX-r.left)/r.width*view.w,my=view.y+(e.clientY-r.top)/r.height*view.h,f=e.deltaY>0?1.18:.84;view.x=mx-(mx-view.x)*f;view.y=my-(my-view.y)*f;view.w*=f;view.h*=f;setView()},{passive:false});let drag=null;svg.addEventListener("pointerdown",e=>{drag={x:e.clientX,y:e.clientY,v:{...view}};svg.setPointerCapture(e.pointerId)});svg.addEventListener("pointermove",e=>{if(!drag)return;const r=svg.getBoundingClientRect();view.x=drag.v.x-(e.clientX-drag.x)/r.width*drag.v.w;view.y=drag.v.y-(e.clientY-drag.y)/r.height*drag.v.h;setView()});svg.addEventListener("pointerup",()=>drag=null);
+const d=JSON.parse(document.getElementById("plan-data").textContent),m=d.metrics,fmt=(v,n=1)=>v==null?"—":Number(v).toFixed(n),trimStatus=m.trim_transect_length_enabled?(m.trimmed_transect_count>0?`${m.trimmed_transect_count} oversized ${m.trimmed_transect_count===1?"transect":"transects"} trimmed to ${fmt(m.transect_length_limit_km,2)} km; coverage reduced.`:`Enabled; no transects required trimming.`):"Off";document.getElementById("subtitle").textContent=`${d.drone_label} • generated ${d.generated_at} • ${d.transects.length} transects`;const cards=[["Area",fmt(m.area_ha,2)+" ha","survey polygon"],["Height",fmt(m.altitude_m,1)+" m","above home"],["Speed",fmt(m.speed_mps,1)+" m/s",m.optimisation_label],["Photo interval",fmt(m.photo_interval_s,2)+" s","timed capture"],["Forward overlap",fmt(m.forward_overlap_pct,1)+"%","selected survey setting"],["Sidelap",fmt(m.sidelap_pct,1)+"%",m.sidelap_pct<0?"negative sidelap (gap between swaths)":"adjacent footprints edge-to-edge"],["Footprint",fmt(m.footprint_width_m,1)+" × "+fmt(m.footprint_length_m,1)+" m","cross-track × along-track"],["Footprint gap",fmt(m.footprint_gap_m,1)+" m","between adjacent footprints"],["Longest transect",fmt(m.longest_transect_km,2)+" km",trimStatus],["Photos",m.photo_count,"planned centres"],["Route",fmt(m.route_distance_km,2)+" km",fmt(m.flight_time_min,1)+" min • "+m.batteries+" battery estimate"]];document.getElementById("cards").innerHTML=cards.map(c=>`<article class="card"><div class="label">${c[0]}</div><div class="value">${c[1]}</div><div class="sub">${c[2]}</div></article>`).join("");document.getElementById("settings").innerHTML=[["Drone",d.drone_label],["GSD",fmt(m.gsd_cm,2)+" cm/px"],["Forward overlap",fmt(m.forward_overlap_pct,1)+"%"],["Sidelap",fmt(m.sidelap_pct,1)+"%"],["Transect direction",fmt(m.transect_angle_deg,0)+"° from north"],["Mission start",m.start_corner],["Route order",m.reverse_order?"Reversed":"Standard"],["Transects",m.transect_count],["1.8 km trimming",trimStatus],["Stationary pilot radius",m.pilot_radius_enabled?fmt(m.pilot_radius_m,1)+" m":"Off"],["Pilot coordinates",d.pilot?fmt(d.pilot[1],6)+", "+fmt(d.pilot[0],6):"Not set"],["Capture optimisation",m.optimisation_label],["Expected photos",m.photo_count]].map(x=>`<div class="kv"><span>${x[0]}</span><span>${x[1]}</span></div>`).join("");document.getElementById("notes").innerHTML=`<p>The route and photo centres are generated from the selected AOI and current planner settings. The first image is triggered as each transect begins; interval capture is disabled on connector legs.</p><p>Forward overlap is the selected target for consecutive images along a transect. Sidelap describes adjacent image swaths: 0% means edge-to-edge coverage, and a negative value means a gap between swaths. Sidelap is calculated from the footprint gap, planned flight height and camera geometry.</p><p>${trimStatus}</p><p>${m.pilot_radius_enabled?`Survey lines are clipped to ${fmt(m.pilot_radius_m,1)} m from the stationary pilot, reducing coverage. Confirm actual visual line of sight; the radius is a planning aid.`:"Stationary pilot radius limit is off."}</p><p>Flight time is route distance divided by planned speed and excludes take-off, landing, turns, acceleration, wind and operational delays. Battery count uses ${m.battery_minutes} usable minutes per battery.</p><p>Review the exported route, home point, altitude reference, obstacles, lighting, shutter speed, wind and regulatory requirements before flight.</p>`;
+const R=6378137,all=[...d.aoi,...d.transects.flat(),...d.photo_points.map(p=>p.center)],lon0=all.reduce((s,p)=>s+p[0],0)/all.length,lat0=all.reduce((s,p)=>s+p[1],0)/all.length,rad=Math.PI/180,xy=p=>[(p[0]-lon0)*rad*R*Math.cos(lat0*rad),(p[1]-lat0)*rad*R],aoi=d.aoi.map(xy),lines=d.transects.map(t=>t.map(xy)),photos=d.photo_points.map(p=>({...p,xy:xy(p.center)})),points=[...aoi,...lines.flat(),...(d.pilot_boundary||[]).map(xy)],xs=points.map(p=>p[0]),ys=points.map(p=>-p[1]),minX=Math.min(...xs),maxX=Math.max(...xs),minY=Math.min(...ys),maxY=Math.max(...ys),pad=Math.max(maxX-minX,maxY-minY)*.05,home={x:minX-pad,y:minY-pad,w:maxX-minX+2*pad,h:maxY-minY+2*pad};let view={...home};const svg=document.getElementById("map"),ns="http://www.w3.org/2000/svg",setView=()=>svg.setAttribute("viewBox",`${view.x} ${view.y} ${view.w} ${view.h}`);setView();const group=id=>{const g=document.createElementNS(ns,"g");g.id=id;svg.appendChild(g);return g},aoiG=group("aoi"),routeG=group("route"),fpG=group("footprints"),photoG=group("photos");const poly=(g,pts,cls)=>{const e=document.createElementNS(ns,"polygon");e.setAttribute("points",pts.map(p=>`${p[0]},${-p[1]}`).join(" "));e.setAttribute("class",cls);g.appendChild(e)};poly(aoiG,aoi,"aoi");if(d.pilot){const boundary=document.createElementNS(ns,"polygon");boundary.setAttribute("points",d.pilot_boundary.map(xy).map(p=>`${p[0]},${-p[1]}`).join(" "));boundary.setAttribute("fill","#7b329410");boundary.setAttribute("stroke","#7b3294");boundary.setAttribute("stroke-width","2");boundary.setAttribute("stroke-dasharray","6 4");boundary.setAttribute("vector-effect","non-scaling-stroke");aoiG.appendChild(boundary);const p=xy(d.pilot),marker=document.createElementNS(ns,"circle");marker.setAttribute("cx",p[0]);marker.setAttribute("cy",-p[1]);marker.setAttribute("r",Math.max(home.w,home.h)*.006);marker.setAttribute("fill","#7b3294");aoiG.appendChild(marker);const label=document.createElementNS(ns,"text");label.setAttribute("x",p[0]);label.setAttribute("y",-p[1]);label.setAttribute("class","end-label");label.textContent="Pilot";aoiG.appendChild(label)}const routePts=[];lines.forEach((line,i)=>{routePts.push(...line);const e=document.createElementNS(ns,"line");e.setAttribute("x1",line[0][0]);e.setAttribute("y1",-line[0][1]);e.setAttribute("x2",line.at(-1)[0]);e.setAttribute("y2",-line.at(-1)[1]);e.setAttribute("class","transect");routeG.appendChild(e);const t=document.createElementNS(ns,"text");t.setAttribute("x",line.at(-1)[0]);t.setAttribute("y",-line.at(-1)[1]);t.setAttribute("class","end-label");t.textContent=String(i+1);routeG.appendChild(t)});const route=document.createElementNS(ns,"polyline");route.setAttribute("points",routePts.map(p=>`${p[0]},${-p[1]}`).join(" "));route.setAttribute("class","route");routeG.insertBefore(route,routeG.firstChild);const s=document.createElementNS(ns,"circle");s.setAttribute("cx",lines[0][0][0]);s.setAttribute("cy",-lines[0][0][1]);s.setAttribute("r",Math.max(home.w,home.h)*.007);s.setAttribute("class","start");routeG.appendChild(s);photos.forEach(p=>{const th=p.bearing*rad,u=[Math.sin(th),Math.cos(th)],v=[Math.cos(th),-Math.sin(th)],hw=m.footprint_width_m/2,hh=m.footprint_length_m/2,c=p.xy,corners=[[-hh,-hw],[hh,-hw],[hh,hw],[-hh,hw]].map(q=>[c[0]+q[0]*u[0]+q[1]*v[0],c[1]+q[0]*u[1]+q[1]*v[1]]);poly(fpG,corners,"footprint");const e=document.createElementNS(ns,"circle");e.setAttribute("cx",c[0]);e.setAttribute("cy",-c[1]);e.setAttribute("r",Math.max(home.w,home.h)*.0018);e.setAttribute("class","photo");photoG.appendChild(e)});fpG.style.display="none";document.getElementById("toggle-route").onchange=e=>routeG.style.display=e.target.checked?"":"none";document.getElementById("toggle-photos").onchange=e=>photoG.style.display=e.target.checked?"":"none";document.getElementById("toggle-footprints").onchange=e=>fpG.style.display=e.target.checked?"":"none";document.getElementById("reset-view").onclick=()=>{view={...home};setView()};svg.addEventListener("wheel",e=>{e.preventDefault();const r=svg.getBoundingClientRect(),mx=view.x+(e.clientX-r.left)/r.width*view.w,my=view.y+(e.clientY-r.top)/r.height*view.h,f=e.deltaY>0?1.18:.84;view.x=mx-(mx-view.x)*f;view.y=my-(my-view.y)*f;view.w*=f;view.h*=f;setView()},{passive:false});let drag=null;svg.addEventListener("pointerdown",e=>{drag={x:e.clientX,y:e.clientY,v:{...view}};svg.setPointerCapture(e.pointerId)});svg.addEventListener("pointermove",e=>{if(!drag)return;const r=svg.getBoundingClientRect();view.x=drag.v.x-(e.clientX-drag.x)/r.width*drag.v.w;view.y=drag.v.y-(e.clientY-drag.y)/r.height*drag.v.h;setView()});svg.addEventListener("pointerup",()=>drag=null);
 </script></body></html>'
   writeLines(sub("__PAYLOAD__", payload, template, fixed = TRUE), file,
              useBytes = TRUE)
@@ -1814,6 +1852,61 @@ read_survey_plan_upload <- function(upload_path, original_name) {
 # Server Logic
 # ==============================================================================
 server <- function(input, output, session) {
+  export_filename <- function(kind, extension, default,
+                              timestamp = format(Sys.time(), "%Y%m%d_%H%M%S")) {
+    name <- safe_export_name(input$export_name)
+    if (!nzchar(name)) return(default)
+    paste0(name, "_", selected_drone()$file_tag, "_", kind, "_", timestamp, extension)
+  }
+  observeEvent(input$start_fresh, {
+    session$reload()
+  }, ignoreInit = TRUE)
+
+  pilot_point <- reactiveVal(NULL)
+  pilot_distance <- reactive({
+    value <- input$pilot_distance_m
+    validate(need(is.numeric(value) && length(value) == 1L &&
+      is.finite(value) && value >= 1, "Enter a pilot distance of at least 1 metre."))
+    value
+  })
+  placing_pilot <- reactiveVal(FALSE)
+  observeEvent(input$place_pilot, {
+    placing_pilot(TRUE)
+  })
+  observeEvent(input$cancel_place_pilot, placing_pilot(FALSE))
+  observeEvent(input$remove_pilot_trim, {
+    placing_pilot(FALSE)
+    updateCheckboxInput(session, "limit_pilot_radius", value = FALSE)
+  })
+  observeEvent(input$limit_pilot_radius, {
+    if (!isTRUE(input$limit_pilot_radius)) placing_pilot(FALSE)
+  })
+  observeEvent(input$map_click, {
+    if (!isTRUE(input$limit_pilot_radius) || !placing_pilot()) return()
+    click <- input$map_click
+    pilot_point(c(click$lng, click$lat))
+    placing_pilot(FALSE)
+  })
+  output$pilot_status <- renderText({
+    if (placing_pilot()) return("Click the map to place the stationary pilot.")
+    point <- pilot_point()
+    if (is.null(point)) return("Place the pilot to generate a route within the selected radius.")
+    sprintf("Pilot: %.6f, %.6f (latitude, longitude). Radius: %s m.",
+      point[2], point[1], format(pilot_distance(), trim = TRUE))
+  })
+  observeEvent(list(input$limit_pilot_radius, pilot_point(), input$pilot_distance_m), {
+    proxy <- leafletProxy("map", session) %>% clearGroup("pilot_radius")
+    point <- pilot_point()
+    if (!isTRUE(input$limit_pilot_radius) || is.null(point)) return()
+    boundary <- sf::st_transform(pilot_radius_geometry(point, pilot_distance()), 4326)
+    proxy %>%
+      addPolygons(data = boundary, color = "#7b3294", weight = 2,
+        dashArray = "6,4", fillOpacity = 0.06, group = "pilot_radius",
+        options = pathOptions(interactive = FALSE)) %>%
+      addMarkers(lng = point[1], lat = point[2], layerId = "stationary_pilot",
+        group = "pilot_radius", label = sprintf("Stationary pilot (%s m radius)", pilot_distance()))
+  }, ignoreNULL = FALSE)
+
   # Mission height is always interpreted relative to the home/takeoff point,
   # matching the exported WPML height mode for every supported aircraft.
   assumed_battery_minutes <- 25
@@ -1885,17 +1978,11 @@ server <- function(input, output, session) {
     
     if (is.null(poly_df) || nrow(poly_df) < 3) {
       # Disable all export buttons
-      shinyjs::disable("download_kml")
-      shinyjs::disable("download_kmz")
-      shinyjs::disable("download_litchi_bundle")
-      shinyjs::disable("download_plan_summary")
+      shinyjs::disable("download_complete_plan")
       shinyjs::disable("resize_polygon_area")
     } else {
       # Enable all export buttons
-      shinyjs::enable("download_kml")
-      shinyjs::enable("download_kmz")
-      shinyjs::enable("download_litchi_bundle")
-      shinyjs::enable("download_plan_summary")
+      shinyjs::enable("download_complete_plan")
       shinyjs::enable("resize_polygon_area")
     }
   })
@@ -1966,7 +2053,7 @@ server <- function(input, output, session) {
         "Maximum-efficiency capture: %.1f m/s at %.2f s intervals (%.1f%% forward overlap)",
         capture$speed,
         capture$interval,
-        capture$achieved_overlap
+        input$front_overlap
       )
     )
   })
@@ -2290,11 +2377,6 @@ server <- function(input, output, session) {
     }, delay = 0.3)
   }
 
-  # Advisory restriction import. Warnings derive from drawn_polygon(), so they
-  # update after draws, edits, drags, imports, resizes, and rotations. Hiding
-  # the overlay never suppresses the warning.
-  restriction_zones <- restriction_tools_server(input, output, session, drawn_polygon)
-
   # --- Observer for Clear Polygon Button ---
   observeEvent(input$clear_polygon, {
     drawn_polygon(NULL)
@@ -2408,7 +2490,6 @@ server <- function(input, output, session) {
           "Satellite", "Street Map", "DEA Low Tide", "DEA High Tide",
           "DEA Intertidal Extent (2024)"
         ),
-        overlayGroups = c(restriction_group),
         options = layersControlOptions(collapsed = FALSE)
       ) %>%
       addControl(
@@ -2461,6 +2542,10 @@ server <- function(input, output, session) {
                                                   cam, transect_angle = 0,
                                                   trim_long_transects = FALSE) {
     # Returns list(transects = list of matrices), photo_points = list of matrices
+    if (isTRUE(input$limit_pilot_radius) && is.null(pilot_point())) {
+      return(list(transects = list(), photo_points = list(),
+        trimmed_transect_count = 0L, original_longest_transect_m = 0))
+    }
     if (is.null(poly_df) || nrow(poly_df) < 3) return(list(transects = list(), photo_points = list()))
     # Defensive checks for inputs
     if (is.null(transect_angle) || length(transect_angle) == 0 || !is.numeric(transect_angle)) transect_angle <- 0
@@ -2563,16 +2648,20 @@ server <- function(input, output, session) {
           original_transect_lengths_m <- c(
             original_transect_lengths_m, original_length_m
           )
-          if (isTRUE(trim_long_transects) &&
-              original_length_m > transect_length_limit_m) {
-            coords_ll <- trim_transect_to_length(
-              coords_ll, transect_length_limit_m
-            )
-            trimmed_transect_count <- trimmed_transect_count + 1L
-          }
           transects[[length(transects) + 1]] <- coords_ll
         }
       }
+    }
+    if (isTRUE(input$limit_pilot_radius)) {
+      transects <- clip_transects_to_pilot_radius(transects, pilot_point(), pilot_distance())
+    }
+    # Apply midpoint trimming after radius clipping so enabling both controls
+    # does not discard useful coverage near an off-centre pilot.
+    if (isTRUE(trim_long_transects)) {
+      lengths <- vapply(transects, transect_length_m, numeric(1))
+      trimmed_transect_count <- sum(lengths > transect_length_limit_m)
+      transects <- lapply(transects, trim_transect_to_length,
+        max_length_m = transect_length_limit_m)
     }
     photo_points <- generate_photo_points_for_transects(transects, eff_height)
     list(
@@ -2583,31 +2672,6 @@ server <- function(input, output, session) {
         max(original_transect_lengths_m)
       } else 0
     )
-  }
-
-  notify_oversized_transects <- function(transects, export_label) {
-    route_metrics <- measure_transect_route(transects)
-    oversized_count <- sum(
-      route_metrics$transect_lengths_m > transect_length_limit_m + 1e-6
-    )
-    if (oversized_count > 0) {
-      showNotification(
-        sprintf(
-          paste0(
-            "Warning: %d transect%s exceed%s 1.4 km (longest %.2f km). ",
-            "%s will continue; assess line of sight or enable trimming."
-          ),
-          oversized_count,
-          if (oversized_count == 1L) "" else "s",
-          if (oversized_count == 1L) "s" else "",
-          route_metrics$longest_transect_m / 1000,
-          export_label
-        ),
-        type = "warning",
-        duration = 10
-      )
-    }
-    invisible(oversized_count)
   }
 
   coordinates_as_list <- function(coords) {
@@ -2633,7 +2697,9 @@ server <- function(input, output, session) {
       poly_df, altitude, input$transect_gap_m, cam, angle,
       input$trim_transect_length
     )
-    validate(need(length(result$transects) > 0, "No survey transects were generated."))
+    validate(need(length(result$transects) > 0,
+      if (isTRUE(input$limit_pilot_radius)) "Place the pilot so the selected radius overlaps the survey transects."
+      else "No survey transects were generated."))
 
     start_corner <- if (is.null(input$start_corner)) "top_left" else input$start_corner
     ordered_transects <- reorder_transects_by_start(
@@ -2675,6 +2741,10 @@ server <- function(input, output, session) {
       generated_at = format(Sys.time(), "%Y-%m-%d %H:%M %Z"),
       drone_label = selected_drone()$label,
       aoi = coordinates_as_list(aoi_coords),
+      pilot = if (isTRUE(input$limit_pilot_radius)) unname(as.list(pilot_point())) else NULL,
+      pilot_boundary = if (isTRUE(input$limit_pilot_radius)) coordinates_as_list(
+        sf::st_coordinates(sf::st_transform(pilot_radius_geometry(pilot_point(), pilot_distance()), 4326))[, 1:2]
+      ) else list(),
       transects = lapply(ordered_transects, coordinates_as_list),
       photo_points = photo_points,
       metrics = list(
@@ -2683,7 +2753,9 @@ server <- function(input, output, session) {
         speed_mps = speed,
         optimisation_label = optimisation_label,
         photo_interval_s = capture$interval,
-        forward_overlap_pct = capture$achieved_overlap,
+        forward_overlap_pct = input$front_overlap,
+        sidelap_pct = 0 - 100 * max(0, input$transect_gap_m) /
+          (cam$footprint_width_ratio * altitude),
         footprint_width_m = cam$footprint_width_ratio * altitude,
         footprint_length_m = cam$footprint_height_ratio * altitude,
         footprint_gap_m = max(0, input$transect_gap_m),
@@ -2699,6 +2771,8 @@ server <- function(input, output, session) {
           route_metrics$transect_lengths_m > transect_length_limit_m + 1e-6
         ),
         trim_transect_length_enabled = isTRUE(input$trim_transect_length),
+        pilot_radius_enabled = isTRUE(input$limit_pilot_radius),
+        pilot_radius_m = if (isTRUE(input$limit_pilot_radius)) pilot_distance() else NULL,
         transect_length_limit_m = transect_length_limit_m,
         transect_length_limit_km = transect_length_limit_m / 1000,
         survey_distance_km = route_metrics$survey_distance_m / 1000,
@@ -2757,6 +2831,9 @@ server <- function(input, output, session) {
       input$drone_model,
       input$transect_angle,
       input$trim_transect_length,
+      input$limit_pilot_radius,
+      input$pilot_distance_m,
+      pilot_point(),
       input$start_corner,
       input$reverse_transect_order
     ),
@@ -3078,7 +3155,7 @@ server <- function(input, output, session) {
     capture <- capture_settings()
     photo_interval <- capture$interval
     transect_gap_m <- max(0, input$transect_gap_m)
-    effective_sidelap <- -100 * transect_gap_m /
+    effective_sidelap <- 0 - 100 * transect_gap_m /
       (cam$footprint_width_ratio * altitude)
     
     metric_row <- function(label, value) {
@@ -3095,7 +3172,7 @@ server <- function(input, output, session) {
       sprintf(
         paste0(
           "<div class='alert alert-warning' style='margin:10px 0 0;'>",
-          "<strong>Line-of-sight warning:</strong> %d transect%s exceed%s 1.4 km ",
+          "<strong>Line-of-sight warning:</strong> %d transect%s exceed%s 1.8 km ",
           "(longest %.2f km). Exports remain available. Enable trimming to shorten them.",
           "</div>"
         ),
@@ -3115,7 +3192,7 @@ server <- function(input, output, session) {
           metric_row("Speed", sprintf("%.1f m/s", speed)),
           metric_row("GSD", if (!is.na(gsd_cm)) sprintf("%.2f cm/px", gsd_cm) else "N/A"),
           metric_row("Photo interval", if (!is.na(photo_interval)) sprintf("%.2f s", photo_interval) else "N/A"),
-          metric_row("Achieved forward overlap", sprintf("%.1f%%", capture$achieved_overlap)),
+          metric_row("Forward overlap", sprintf("%.1f%%", input$front_overlap)),
         "</div>",
         "<div class='mission-metric-section'>",
           "<div class='mission-metric-heading'>Coverage</div>",
@@ -3123,8 +3200,9 @@ server <- function(input, output, session) {
           metric_row("Footprint gap", sprintf("%.1f m (%.1f%% sidelap)", transect_gap_m, effective_sidelap)),
           metric_row("Transects", if (!is.null(plan_metrics)) prettyNum(plan_metrics$transect_count, big.mark = ",") else "N/A"),
           metric_row("Longest transect", if (!is.null(plan_metrics)) sprintf("%.2f km", plan_metrics$longest_transect_km) else "N/A"),
+          metric_row("Stationary pilot radius", if (isTRUE(input$limit_pilot_radius)) sprintf("%s m", pilot_distance()) else "Off"),
           metric_row(
-            "1.4 km trimming",
+            "1.8 km trimming",
             if (!isTRUE(input$trim_transect_length)) {
               "Off"
             } else if (!is.null(plan_metrics) && plan_metrics$trimmed_transect_count > 0) {
@@ -3151,371 +3229,408 @@ server <- function(input, output, session) {
   })
 
   # --- Self-contained plan summary export ---
-  output$download_plan_summary <- downloadHandler(
-    filename = function() {
-      paste0(
-        "Megafauna_", selected_drone()$file_tag, "_Plan_Summary_",
-        format(Sys.time(), "%Y%m%d_%H%M%S"), ".html"
-      )
-    },
-    contentType = "text/html",
-    content = function(file) {
-      plan_data <- build_plan_summary_data()
-      if (plan_data$metrics$oversized_transect_count > 0) {
-        showNotification(
-          sprintf(
-            "Warning: %d transect%s exceed%s 1.4 km. Summary export will continue.",
-            plan_data$metrics$oversized_transect_count,
-            if (plan_data$metrics$oversized_transect_count == 1L) "" else "s",
-            if (plan_data$metrics$oversized_transect_count == 1L) "s" else ""
-          ),
-          type = "warning",
-          duration = 10
-        )
-      }
-      write_plan_summary_html(file, plan_data)
-    }
-  )
-  
+  write_summary_export <- function(file) {
+    plan_data <- build_plan_summary_data()
+    write_plan_summary_html(file, plan_data)
+  }
+
   # --- KML Export Handler (for AOI polygon only) ---
-  output$download_kml <- downloadHandler(
-    filename = function() {
-      paste0("aoi_polygon_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".kml")
-    },
-    contentType = "application/vnd.google-earth.kml+xml",
-    content = function(file) {
-      poly_df <- drawn_polygon()
-      
-      # Ensure polygon is closed for KML
-      if (!all(poly_df[1,] == poly_df[nrow(poly_df),])) {
-        poly_df <- rbind(poly_df, poly_df[1,])
-      }
-      
-      # Generate coordinate string for KML (lon,lat,alt format)
-      coords_str <- paste(apply(poly_df, 1, function(row) {
-        paste(row[1], row[2], "0", sep = ",")
-      }), collapse = "\n            ")
-      
-      # Generate KML content
-      kml_content <- sprintf('<?xml version="1.0" encoding="UTF-8"?>
+  write_aoi_export <- function(file) {
+    poly_df <- drawn_polygon()
+
+    # Ensure polygon is closed for KML
+    if (!all(poly_df[1,] == poly_df[nrow(poly_df),])) {
+      poly_df <- rbind(poly_df, poly_df[1,])
+    }
+
+    # Generate coordinate string for KML (lon,lat,alt format)
+    coords_str <- paste(apply(poly_df, 1, function(row) {
+      paste(row[1], row[2], "0", sep = ",")
+    }), collapse = "\n            ")
+
+    # Generate KML content
+    kml_content <- sprintf('<?xml version="1.0" encoding="UTF-8"?>
 <kml xmlns="http://www.opengis.net/kml/2.2">
-  <Document>
-    <name>AOI Polygon</name>
-    <description>Megafauna survey area exported from Megafauna Drone Survey Planner</description>
-    <Style id="AOI_Style">
-      <LineStyle>
-        <color>ff0000ff</color>
-        <width>2</width>
-      </LineStyle>
-      <PolyStyle>
-        <color>4d0000ff</color>
-      </PolyStyle>
-    </Style>
-    <Placemark>
-      <name>Survey Area</name>
-      <styleUrl>#AOI_Style</styleUrl>
-      <Polygon>
-        <outerBoundaryIs>
-          <LinearRing>
-            <coordinates>
-            %s
-            </coordinates>
-          </LinearRing>
-        </outerBoundaryIs>
-      </Polygon>
-    </Placemark>
-  </Document>
+<Document>
+  <name>AOI Polygon</name>
+  <description>Megafauna survey area exported from Megafauna Drone Survey Planner</description>
+  <Style id="AOI_Style">
+    <LineStyle>
+      <color>ff0000ff</color>
+      <width>2</width>
+    </LineStyle>
+    <PolyStyle>
+      <color>4d0000ff</color>
+    </PolyStyle>
+  </Style>
+  <Placemark>
+    <name>Survey Area</name>
+    <styleUrl>#AOI_Style</styleUrl>
+    <Polygon>
+      <outerBoundaryIs>
+        <LinearRing>
+          <coordinates>
+          %s
+          </coordinates>
+        </LinearRing>
+      </outerBoundaryIs>
+    </Polygon>
+  </Placemark>
+</Document>
 </kml>', coords_str)
-      
-      # Write to file
-      writeLines(kml_content, file)
-    }
-  )
-  
+
+    # Write to file
+    writeLines(kml_content, file)
+  }
+
   # --- KMZ Export Handler ---
-  output$download_kmz <- downloadHandler(
-    filename = function() {
-      paste0(
-        "DJIWaypointMegafauna", selected_drone()$file_tag, "Mission",
-        format(Sys.time(), "%Y%m%d-%H%M%S"), ".kmz"
-      )
-    },
-    contentType = "application/vnd.google-earth.kmz",
-    content = function(file) {
-      poly_df <- drawn_polygon()
-      
-      # Require other parameters
-      req(input$front_overlap, input$transect_gap_m)
-      altitude <- mission_altitude()
-      cam <- camera_params()
-      drone_model <- selected_drone()
-      speed <- mission_speed()
-      angle <- if (is.null(input$transect_angle)) 0 else input$transect_angle
-      
-      # Generate transects and photo points
-      res <- generate_transects_and_photopoints(
-        poly_df, altitude, input$transect_gap_m, cam, angle,
-        input$trim_transect_length
-      )
-      
-      # Check if transects were generated
-      if (length(res$transects) == 0) {
-        showNotification("No transects generated. Check your polygon and parameters.", type = "error", duration = 5)
-        req(FALSE)  # Stop the download
-      }
-      
-      # Create temp directory for KMZ contents
-      temp_dir <- tempfile()
-      dir.create(temp_dir, recursive = TRUE)
-      wpmz_dir <- file.path(temp_dir, "wpmz")
-      dir.create(wpmz_dir, showWarnings = FALSE, recursive = TRUE)
-      
-      photo_interval <- capture_settings()$interval
-      
-      # Reorder transects based on start corner
-      start_corner <- if (is.null(input$start_corner)) "top_left" else input$start_corner
-      transects_ordered <- reorder_transects_by_start(res$transects, start_corner, angle)
-      transects_ordered <- apply_reverse_transect_order(
-        transects_ordered, input$reverse_transect_order
-      )
-      notify_oversized_transects(transects_ordered, "KMZ export")
-      
-      # Generate an editable DJI waypoint template with transect-scoped timed
-      # photo actions (mapping2d cannot represent the requested zero sidelap).
-      template_kml <- generate_template_kml(
-        transects_ordered, altitude, speed, photo_interval, drone_model
-      )
-      writeLines(template_kml, file.path(wpmz_dir, "template.kml"))
-      
-      # Generate waylines.wpml with reordered transects
-      waylines_wpml <- generate_waylines_wpml(
-        transects_ordered, altitude, speed, photo_interval, drone_model
-      )
-      writeLines(waylines_wpml, file.path(wpmz_dir, "waylines.wpml"))
-      
-      # Create ZIP file (KMZ is just a ZIP) to a temp location first
-      temp_kmz <- tempfile(fileext = ".kmz")
-      zip::zip(
-        zipfile = temp_kmz,
-        files = c("wpmz/template.kml", "wpmz/waylines.wpml"),
-        root = temp_dir,
-        mode = "mirror",
-        include_directories = FALSE
-      )
-      
-      # Copy the ZIP file to the final destination
-      file.copy(temp_kmz, file, overwrite = TRUE)
-      
-      # Clean up temp files
-      unlink(temp_kmz)
-      unlink(temp_dir, recursive = TRUE)
+  write_kmz_export <- function(file) {
+    poly_df <- drawn_polygon()
+
+    # Require other parameters
+    req(input$front_overlap, input$transect_gap_m)
+    altitude <- mission_altitude()
+    cam <- camera_params()
+    drone_model <- selected_drone()
+    speed <- mission_speed()
+    angle <- if (is.null(input$transect_angle)) 0 else input$transect_angle
+
+    # Generate transects and photo points
+    res <- generate_transects_and_photopoints(
+      poly_df, altitude, input$transect_gap_m, cam, angle,
+      input$trim_transect_length
+    )
+
+    # Check if transects were generated
+    if (length(res$transects) == 0) {
+      showNotification("No transects generated. Check your polygon and parameters.", type = "error", duration = 5)
+      req(FALSE)  # Stop the download
     }
-  )
-  
+
+    # Create temp directory for KMZ contents
+    temp_dir <- tempfile()
+    dir.create(temp_dir, recursive = TRUE)
+    wpmz_dir <- file.path(temp_dir, "wpmz")
+    dir.create(wpmz_dir, showWarnings = FALSE, recursive = TRUE)
+
+    photo_interval <- capture_settings()$interval
+
+    # Reorder transects based on start corner
+    start_corner <- if (is.null(input$start_corner)) "top_left" else input$start_corner
+    transects_ordered <- reorder_transects_by_start(res$transects, start_corner, angle)
+    transects_ordered <- apply_reverse_transect_order(
+      transects_ordered, input$reverse_transect_order
+    )
+
+    # Generate an editable DJI waypoint template with transect-scoped timed
+    # photo actions (mapping2d cannot represent the requested zero sidelap).
+    template_kml <- generate_template_kml(
+      transects_ordered, altitude, speed, photo_interval, drone_model
+    )
+    writeLines(template_kml, file.path(wpmz_dir, "template.kml"))
+
+    # Generate waylines.wpml with reordered transects
+    waylines_wpml <- generate_waylines_wpml(
+      transects_ordered, altitude, speed, photo_interval, drone_model
+    )
+    writeLines(waylines_wpml, file.path(wpmz_dir, "waylines.wpml"))
+
+    # Create ZIP file (KMZ is just a ZIP) to a temp location first
+    temp_kmz <- tempfile(fileext = ".kmz")
+    zip::zip(
+      zipfile = temp_kmz,
+      files = c("wpmz/template.kml", "wpmz/waylines.wpml"),
+      root = temp_dir,
+      mode = "mirror",
+      include_directories = FALSE
+    )
+
+    # Copy the ZIP file to the final destination
+    file.copy(temp_kmz, file, overwrite = TRUE)
+
+    # Clean up temp files
+    unlink(temp_kmz)
+    unlink(temp_dir, recursive = TRUE)
+  }
+
   # --- Litchi Plan Bundle Export Handler ---
-  output$download_litchi_bundle <- downloadHandler(
-    filename = function() {
-      model <- selected_drone()
-      paste0(
-        "Megafauna_Litchi_", model$file_tag, "_Plan_Bundle_",
-        format(Sys.time(), "%Y%m%d_%H%M%S"), ".zip"
-      )
-    },
-    contentType = "application/zip",
-    content = function(file) {
-      bundle_dir <- tempfile("litchi_bundle_")
-      dir.create(bundle_dir, recursive = TRUE)
-      on.exit(unlink(bundle_dir, recursive = TRUE, force = TRUE), add = TRUE)
+  write_litchi_export <- function(file) {
+    bundle_dir <- tempfile("litchi_bundle_")
+    dir.create(bundle_dir, recursive = TRUE)
+    on.exit(unlink(bundle_dir, recursive = TRUE, force = TRUE), add = TRUE)
 
-      poly_df <- drawn_polygon()
-      
-      # Require other parameters
-      req(input$front_overlap, input$transect_gap_m)
-      altitude <- mission_altitude()
-      cam <- camera_params()
-      drone_model <- selected_drone()
-      speed <- mission_speed()
-      angle <- if (is.null(input$transect_angle)) 0 else input$transect_angle
-      
-      # Generate transects and photo points
-      res <- generate_transects_and_photopoints(
-        poly_df, altitude, input$transect_gap_m, cam, angle,
-        input$trim_transect_length
-      )
-      
-      # Check if transects were generated
-      if (length(res$transects) == 0) {
-        showNotification("No transects generated. Check your polygon and parameters.", type = "error", duration = 5)
-        req(FALSE)  # Stop the download
-      }
-      
-      photo_interval <- capture_settings()$interval
-      validate_model_capture_settings(
-        drone_model, speed, photo_interval, "Litchi export"
-      )
-      
-      # Reorder transects based on start corner
-      start_corner <- if (is.null(input$start_corner)) "top_left" else input$start_corner
-      transects_ordered <- reorder_transects_by_start(res$transects, start_corner, angle)
-      transects_ordered <- apply_reverse_transect_order(
-        transects_ordered, input$reverse_transect_order
-      )
-      notify_oversized_transects(transects_ordered, "Litchi export")
-      
-      # Flatten transects to waypoint list
-      waypoints <- data.frame()
-      waypoint_idx <- 1
-      
-      for (i in seq_along(transects_ordered)) {
-        transect <- transects_ordered[[i]]
-        n_points <- nrow(transect)
-        
-        # Calculate heading for this transect (direction from first to last point)
-        if (n_points >= 2) {
-          bearing <- geosphere::bearing(
-            c(transect[1, 1], transect[1, 2]),
-            c(transect[n_points, 1], transect[n_points, 2])
-          )
-          # Normalize bearing to 0-360
-          if (bearing < 0) bearing <- bearing + 360
-        } else {
-          bearing <- 0
-        }
-        
-        # Add all photo points in this transect
-        for (j in 1:n_points) {
-          wp <- data.frame(
-            latitude = transect[j, 2],
-            longitude = transect[j, 1],
-            `altitude(m)` = altitude,
-            `heading(deg)` = round(bearing),
-            `curvesize(m)` = 0.2,
-            rotationdir = 0,
-            gimbalmode = 2,
-            gimbalpitchangle = -90,
-            actiontype1 = if (waypoint_idx == 1) 0 else -1,
-            actionparam1 = if (waypoint_idx == 1) 10000 else 0,
-            altitudemode = 0,
-            `speed(m/s)` = speed,
-            poi_latitude = 0,
-            poi_longitude = 0,
-            `poi_altitude(m)` = 0,
-            poi_altitudemode = 0,
-            photo_timeinterval = if (j < n_points) round(photo_interval, 2) else 0,  # Photo interval except at transect ends
-            photo_distinterval = 0,
-            check.names = FALSE
-          )
-          waypoints <- rbind(waypoints, wp)
-          waypoint_idx <- waypoint_idx + 1
-        }
-        
-        # Transition to next transect (if not last transect)
-        # All waypoints in a transect keep the same heading (direction of the transect)
-      }
-      
-      timestamp <- format(Sys.time(), "%Y%m%d_%H%M%S")
-      csv_name <- paste0(
-        "Megafauna_Survey_", drone_model$file_tag, "_", timestamp, ".csv"
-      )
-      lchz_name <- paste0(
-        "Megafauna_Survey_", drone_model$file_tag, "_New_Hub_", timestamp, ".lchz"
-      )
-      notes_name <- "README_IMPORT.txt"
+    poly_df <- drawn_polygon()
 
-      validate_litchi_native_plan(waypoints, speed, drone_model)
-      write.csv(waypoints, file.path(bundle_dir, csv_name), row.names = FALSE)
-      native_plan <- litchi_native_plan()
-      write_litchi_lchz(
-        file.path(bundle_dir, lchz_name),
-        native_plan,
-        cruise_speed = speed,
-        drone_model = drone_model
-      )
-      footprint_width <- cam$footprint_width_ratio * altitude
-      footprint_height <- cam$footprint_height_ratio * altitude
-      writeLines(
-        c(
-          "Megafauna Drone Survey Planner - Litchi Plan Bundle",
-          "",
-          paste0("Created: ", format(Sys.time(), "%Y-%m-%d %H:%M:%S %Z")),
-          paste0("Drone/camera profile: ", drone_model$label),
-          paste0("Camera: ", drone_model$camera_note),
-          paste0(
-            "Image footprint at ", sprintf("%.1f", altitude), " m above home: ",
-            sprintf("%.1f", footprint_width), " m wide x ",
-            sprintf("%.1f", footprint_height), " m along-track."
-          ),
-          "",
-          paste0("CSV: ", csv_name),
-          "  Import into the New Litchi Hub and select the matching Litchi Pilot aircraft profile:",
-          paste0("  ", drone_model$label, "."),
-          "  Interval capture is enabled only on transect legs",
-          "  and is switched off on connector legs between transects.",
-          "",
-          paste0("New Hub native plan: ", lchz_name),
-          "  Import into https://hub.flylitchi.com/ via Flight Library > + > Import File.",
-          "  Uses endpoint waypoints with per-segment interval overrides: On for transects, Off for connectors.",
-          paste0("  Flight speed: ", sprintf("%.1f", speed), " m/s; photo interval: ", sprintf("%.2f", photo_interval), " s."),
-          paste0("  Requested forward overlap: ", sprintf("%.1f", input$front_overlap),
-                 "%; achieved after Litchi rounding: ", sprintf("%.1f", capture_settings()$achieved_overlap), "%"),
-          paste0("  Gap between adjacent image footprints: ", sprintf("%.1f", max(0, input$transect_gap_m)), " m."),
-          paste0(
-            "  1.4 km transect trimming: ",
-            if (isTRUE(input$trim_transect_length)) {
-              route_metrics <- measure_transect_route(transects_ordered)
+    # Require other parameters
+    req(input$front_overlap, input$transect_gap_m)
+    altitude <- mission_altitude()
+    cam <- camera_params()
+    drone_model <- selected_drone()
+    speed <- mission_speed()
+    angle <- if (is.null(input$transect_angle)) 0 else input$transect_angle
+
+    # Generate transects and photo points
+    res <- generate_transects_and_photopoints(
+      poly_df, altitude, input$transect_gap_m, cam, angle,
+      input$trim_transect_length
+    )
+
+    # Check if transects were generated
+    if (length(res$transects) == 0) {
+      showNotification("No transects generated. Check your polygon and parameters.", type = "error", duration = 5)
+      req(FALSE)  # Stop the download
+    }
+
+    photo_interval <- capture_settings()$interval
+    validate_model_capture_settings(
+      drone_model, speed, photo_interval, "Litchi export"
+    )
+
+    # Reorder transects based on start corner
+    start_corner <- if (is.null(input$start_corner)) "top_left" else input$start_corner
+    transects_ordered <- reorder_transects_by_start(res$transects, start_corner, angle)
+    transects_ordered <- apply_reverse_transect_order(
+      transects_ordered, input$reverse_transect_order
+    )
+
+    # Flatten transects to waypoint list
+    waypoints <- data.frame()
+    waypoint_idx <- 1
+
+    for (i in seq_along(transects_ordered)) {
+      transect <- transects_ordered[[i]]
+      n_points <- nrow(transect)
+
+      # Calculate heading for this transect (direction from first to last point)
+      if (n_points >= 2) {
+        bearing <- geosphere::bearing(
+          c(transect[1, 1], transect[1, 2]),
+          c(transect[n_points, 1], transect[n_points, 2])
+        )
+        # Normalize bearing to 0-360
+        if (bearing < 0) bearing <- bearing + 360
+      } else {
+        bearing <- 0
+      }
+
+      # Add all photo points in this transect
+      for (j in 1:n_points) {
+        wp <- data.frame(
+          latitude = transect[j, 2],
+          longitude = transect[j, 1],
+          `altitude(m)` = altitude,
+          `heading(deg)` = round(bearing),
+          `curvesize(m)` = 0.2,
+          rotationdir = 0,
+          gimbalmode = 2,
+          gimbalpitchangle = -90,
+          actiontype1 = if (waypoint_idx == 1) 0 else -1,
+          actionparam1 = if (waypoint_idx == 1) 10000 else 0,
+          altitudemode = 0,
+          `speed(m/s)` = speed,
+          poi_latitude = 0,
+          poi_longitude = 0,
+          `poi_altitude(m)` = 0,
+          poi_altitudemode = 0,
+          photo_timeinterval = if (j < n_points) round(photo_interval, 2) else 0,  # Photo interval except at transect ends
+          photo_distinterval = 0,
+          check.names = FALSE
+        )
+        waypoints <- rbind(waypoints, wp)
+        waypoint_idx <- waypoint_idx + 1
+      }
+
+      # Transition to next transect (if not last transect)
+      # All waypoints in a transect keep the same heading (direction of the transect)
+    }
+
+    timestamp <- format(Sys.time(), "%Y%m%d_%H%M%S")
+    csv_name <- export_filename("Litchi", ".csv", paste0(
+      "Megafauna_Survey_", drone_model$file_tag, "_", timestamp, ".csv"
+    ), timestamp)
+    lchz_name <- export_filename("Litchi_New_Hub", ".lchz", paste0(
+      "Megafauna_Survey_", drone_model$file_tag, "_New_Hub_", timestamp, ".lchz"
+    ), timestamp)
+    notes_name <- export_filename("Import_Notes", ".txt", "README_IMPORT.txt", timestamp)
+
+    validate_litchi_native_plan(waypoints, speed, drone_model)
+    write.csv(waypoints, file.path(bundle_dir, csv_name), row.names = FALSE)
+    native_plan <- litchi_native_plan()
+    write_litchi_lchz(
+      file.path(bundle_dir, lchz_name),
+      native_plan,
+      cruise_speed = speed,
+      drone_model = drone_model
+    )
+    footprint_width <- cam$footprint_width_ratio * altitude
+    footprint_height <- cam$footprint_height_ratio * altitude
+    writeLines(
+      c(
+        "Megafauna Drone Survey Planner - Litchi Plan Bundle",
+        "",
+        paste0("Created: ", format(Sys.time(), "%Y-%m-%d %H:%M:%S %Z")),
+        paste0("Drone/camera profile: ", drone_model$label),
+        paste0("Camera: ", drone_model$camera_note),
+        paste0(
+          "Image footprint at ", sprintf("%.1f", altitude), " m above home: ",
+          sprintf("%.1f", footprint_width), " m wide x ",
+          sprintf("%.1f", footprint_height), " m along-track."
+        ),
+        "",
+        paste0("CSV: ", csv_name),
+        "  Transfer the Litchi plan files to the drone RC via SD card.",
+        "  Use the mission application's supported import workflow and select the matching aircraft profile:",
+        paste0("  ", drone_model$label, "."),
+        "  Interval capture is enabled only on transect legs",
+        "  and is switched off on connector legs between transects.",
+        "",
+        paste0("New Hub native plan: ", lchz_name),
+        "  Transfer this native plan to the drone RC via SD card along with the CSV.",
+        "  Uses endpoint waypoints with per-segment interval overrides: On for transects, Off for connectors.",
+        paste0("  Flight speed: ", sprintf("%.1f", speed), " m/s; photo interval: ", sprintf("%.2f", photo_interval), " s."),
+        paste0("  Forward overlap: ", sprintf("%.1f", input$front_overlap), "%"),
+        paste0("  Gap between adjacent image footprints: ", sprintf("%.1f", max(0, input$transect_gap_m)), " m."),
+        paste0(
+          "  1.8 km transect trimming: ",
+          if (isTRUE(input$trim_transect_length)) {
+            route_metrics <- measure_transect_route(transects_ordered)
+            sprintf(
+              "enabled; %d oversized transect%s trimmed; longest exported transect %.2f km.",
+              res$trimmed_transect_count,
+              if (res$trimmed_transect_count == 1L) " was" else "s were",
+              route_metrics$longest_transect_m / 1000
+            )
+          } else {
+            route_metrics <- measure_transect_route(transects_ordered)
+            oversized_count <- sum(
+              route_metrics$transect_lengths_m > transect_length_limit_m + 1e-6
+            )
+            if (oversized_count > 0) {
               sprintf(
-                "enabled; %d oversized transect%s trimmed; longest exported transect %.2f km.",
-                res$trimmed_transect_count,
-                if (res$trimmed_transect_count == 1L) " was" else "s were",
+                paste0(
+                  "off; WARNING: %d transect%s exceed%s 1.8 km ",
+                  "(longest %.2f km). Export was allowed; assess line of sight."
+                ),
+                oversized_count,
+                if (oversized_count == 1L) "" else "s",
+                if (oversized_count == 1L) "s" else "",
                 route_metrics$longest_transect_m / 1000
               )
             } else {
-              route_metrics <- measure_transect_route(transects_ordered)
-              oversized_count <- sum(
-                route_metrics$transect_lengths_m > transect_length_limit_m + 1e-6
-              )
-              if (oversized_count > 0) {
-                sprintf(
-                  paste0(
-                    "off; WARNING: %d transect%s exceed%s 1.4 km ",
-                    "(longest %.2f km). Export was allowed; assess line of sight."
-                  ),
-                  oversized_count,
-                  if (oversized_count == 1L) "" else "s",
-                  if (oversized_count == 1L) "s" else "",
-                  route_metrics$longest_transect_m / 1000
-                )
-              } else {
-                "off; no transect exceeds 1.4 km."
-              }
+              "off; no transect exceeds 1.8 km."
             }
-          ),
-          paste0(
-            "  Transect order: ",
-            if (isTRUE(input$reverse_transect_order)) "reversed (route flown backwards)." else "standard."
-          ),
-          "  The CSV format does not store the aircraft model; confirm the profile after import.",
-          "  The native plan carries the route settings, but still confirm the displayed aircraft",
-          "  profile in Litchi Hub before syncing it to Litchi Pilot.",
-          "  M3E, M3T, M4E and M4T execution requires Litchi Pilot, not the older Litchi app.",
-          "",
-          "IMPORTANT: Before flying, verify the complete route, home point, altitude reference,",
-          "speed, gimbal angle, photo interval overrides, obstacle clearance, return-to-home settings,",
-          "aircraft compatibility, battery requirements, and all applicable aviation rules."
+          }
         ),
-        file.path(bundle_dir, notes_name)
-      )
+        paste0(
+          "  Transect order: ",
+          if (isTRUE(input$reverse_transect_order)) "reversed (route flown backwards)." else "standard."
+        ),
+        if (isTRUE(input$limit_pilot_radius)) sprintf(
+          "  Stationary pilot: %.6f, %.6f (latitude, longitude); route clipped to %s m radius. Confirm actual visual line of sight.",
+          pilot_point()[2], pilot_point()[1], pilot_distance()
+        ) else "  Stationary pilot radius limit: off.",
+        "  The CSV format does not store the aircraft model; confirm the profile after import.",
+        "  The native plan carries the route settings, but still confirm the displayed aircraft",
+        "  profile in the mission application before flight.",
+        "  M3E, M3T, M4E and M4T execution requires Litchi Pilot, not the older Litchi app.",
+        "",
+        "IMPORTANT: Before flying, verify the complete route, home point, altitude reference,",
+        "speed, gimbal angle, photo interval overrides, obstacle clearance, return-to-home settings,",
+        "aircraft compatibility, battery requirements, and all applicable aviation rules."
+      ),
+      file.path(bundle_dir, notes_name)
+    )
 
-      bundle_zip <- tempfile(fileext = ".zip")
-      on.exit(unlink(bundle_zip, force = TRUE), add = TRUE)
-      zip::zipr(
-        zipfile = bundle_zip,
-        files = c(csv_name, lchz_name, notes_name),
-        root = bundle_dir,
-        include_directories = FALSE
-      )
-      file.copy(bundle_zip, file, overwrite = TRUE)
+    bundle_zip <- tempfile(fileext = ".zip")
+    on.exit(unlink(bundle_zip, force = TRUE), add = TRUE)
+    zip::zipr(
+      zipfile = bundle_zip,
+      files = c(csv_name, lchz_name, notes_name),
+      root = bundle_dir,
+      include_directories = FALSE
+    )
+    file.copy(bundle_zip, file, overwrite = TRUE)
+  }
+
+  write_complete_plan <- function(file) {
+    # Validate before writing any format so an incomplete plan cannot be bundled.
+    plan <- build_plan_summary_data()
+    if (plan$metrics$oversized_transect_count > 0) {
+      showNotification("Some transects exceed 1.8 km. Review line of sight before flying.",
+        type = "warning", duration = 10)
     }
+    bundle_dir <- tempfile("complete_plan_")
+    dir.create(bundle_dir)
+    on.exit(unlink(bundle_dir, recursive = TRUE, force = TRUE), add = TRUE)
+    timestamp <- format(Sys.time(), "%Y%m%d_%H%M%S")
+    named_file <- function(kind, extension) export_filename(kind, extension,
+      paste0("Megafauna_", selected_drone()$file_tag, "_", kind, "_", timestamp, extension), timestamp)
+    files <- c(
+      kmz = named_file("DJI_Mission", ".kmz"),
+      litchi = named_file("Litchi_Bundle", ".zip"),
+      summary = named_file("Plan_Summary", ".html"),
+      aoi = named_file("AOI", ".kml")
+    )
+    write_kmz_export(file.path(bundle_dir, files[["kmz"]]))
+    write_litchi_export(file.path(bundle_dir, files[["litchi"]]))
+    write_summary_export(file.path(bundle_dir, files[["summary"]]))
+    write_aoi_export(file.path(bundle_dir, files[["aoi"]]))
+    writeLines(c(
+      "MEGAFAUNA DRONE SURVEY PLANNER - COMPLETE PLAN",
+      "",
+      paste0("Created: ", format(Sys.time(), "%Y-%m-%d %H:%M:%S %Z")),
+      paste0("Aircraft: ", selected_drone()$label),
+      "",
+      "EXTRACT THIS ZIP FIRST",
+      "Extract the complete plan into a folder on your computer before using the files.",
+      "",
+      "DJI MISSION (KMZ)",
+      files[["kmz"]],
+      "Contains the DJI waypoint route, flight settings and transect photo actions.",
+      "Transfer the KMZ to the drone RC via SD card. Import it using the controller's",
+      "compatible DJI mission application, then review the route and aircraft settings.",
+      "Keep this file as .kmz; do not extract or rename its internal files for import.",
+      "",
+      "LITCHI PLAN BUNDLE (ZIP)",
+      files[["litchi"]],
+      "Extract this inner ZIP. It contains a waypoint CSV, a New Litchi Hub native",
+      "plan (.lchz), and detailed import notes (.txt). The CSV and .lchz are alternative",
+      "representations of the same mission; use the format supported by your workflow.",
+      "Transfer the extracted Litchi plan files to the drone RC via SD card.",
+      "Use the mission application's supported import workflow, read the included",
+      "import notes, and confirm the aircraft profile and photo interval settings.",
+      "The .lchz file is a native plan, not a DJI KMZ.",
+      "",
+      "PLAN SUMMARY (HTML)",
+      files[["summary"]],
+      "Open this self-contained file in a web browser on your computer. It records",
+      "the route map, photo centres, forward overlap, sidelap, camera settings,",
+      "mission metrics and planning notes. Use it for review, reporting and archiving.",
+      "This is a report, not a flight mission to import into the drone RC.",
+      "",
+      "SURVEY AREA (KML)",
+      files[["aoi"]],
+      "Contains the original survey polygon for GIS, mapping or future planning.",
+      "It is not the flight route. The polygon stays unchanged when transects are",
+      "trimmed to a length or pilot radius; the route files and summary show that trim.",
+      "",
+      "BEFORE FLIGHT",
+      "Review the imported route, home point, altitude reference, speed, photo actions,",
+      "aircraft compatibility, obstacles, battery requirements and return-to-home settings.",
+      "Confirm actual visual line of sight and current permissions. A pilot-radius",
+      "limit is a planning aid. Flight-time and battery figures are estimates."
+    ), file.path(bundle_dir, "README.txt"))
+    zip::zipr(file, files = c(unname(files), "README.txt"), root = bundle_dir,
+      include_directories = FALSE)
+    invisible(files)
+  }
+
+  output$download_complete_plan <- downloadHandler(
+    filename = function() export_filename("Complete_Plan", ".zip",
+      paste0("Megafauna_", selected_drone()$file_tag, "_Complete_Plan_",
+        format(Sys.time(), "%Y%m%d_%H%M%S"), ".zip")),
+    contentType = "application/zip",
+    content = function(file) write_complete_plan(file)
   )
 
 }
