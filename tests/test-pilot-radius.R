@@ -67,7 +67,9 @@ test_that("placement and radius changes propagate to route, photos, metrics and 
       drone_model = "m3e", transect_angle = 0, start_corner = "top_left",
       reverse_transect_order = FALSE, trim_transect_length = FALSE,
       show_transects = TRUE, show_photopoints = TRUE, show_footprints = FALSE,
-      pilot_distance_m = 900, limit_pilot_radius = FALSE)
+      pilot_distance_m = 900, limit_pilot_radius = FALSE,
+      # This test is about the radius; its pilot sits on land at the Strand.
+      exclude_land = FALSE, avoid_no_fly_zones = FALSE)
     expect_equal(export_filename("AOI", ".kml", "default.kml", "20261104"), "default.kml")
     session$setInputs(export_name = "Bowen Site 01")
     for (kind in c("AOI", "DJI_Mission", "Litchi_Bundle", "Plan_Summary", "Litchi", "Litchi_New_Hub", "Import_Notes")) {
@@ -121,6 +123,9 @@ test_that("placement and radius changes propagate to route, photos, metrics and 
     app_env$write_plan_summary_html(report, plan)
     html <- paste(readLines(report, warn = FALSE), collapse = "\n")
     expect_match(html, '"pilot_radius_m":900', fixed = TRUE)
+    expect_match(html, '"airspace_status":"checked"', fixed = TRUE)
+    expect_match(html, "Airspace check", fixed = TRUE)
+    expect_match(paste(unlist(output$mission_summary), collapse = ""), "Airspace", fixed = TRUE)
     expect_match(html, '"pilot_boundary":', fixed = TRUE)
     expect_match(html, '"forward_overlap_pct":70', fixed = TRUE)
     expect_match(html, '"sidelap_pct":0', fixed = TRUE)
@@ -184,4 +189,39 @@ test_that("placement and radius changes propagate to route, photos, metrics and 
     expect_equal(build_plan_summary_data()$metrics$route_distance_km,
       unrestricted$metrics$route_distance_km)
   })
+})
+
+test_that("remove pilot clears the marker but keeps the radius option on", {
+  shiny::testServer(app_env$server, {
+    session$setInputs(limit_pilot_radius = TRUE, pilot_distance_m = 900)
+    session$setInputs(place_pilot = 1)
+    expect_true(placing_pilot())
+    session$setInputs(cancel_place_pilot = 1)
+    expect_false(placing_pilot())
+    session$setInputs(place_pilot = 2)
+    session$setInputs(map_click = list(lng = 146.8, lat = -19.25))
+    expect_equal(pilot_point(), c(146.8, -19.25))
+    session$setInputs(remove_pilot = 1)
+    expect_null(pilot_point())
+    expect_true(isTRUE(input$limit_pilot_radius))
+  })
+})
+
+test_that("aircraft use DJI's published JPEG minimum photo intervals", {
+  # enterprise.dji.com specs: M4E 0.5 s, M4T 0.7 s, M3E 0.7 s (JPEG). M3T lists
+  # 2 s for JPEG but not at 48 MP, the image size the planner uses, so 3 s.
+  models <- app_env$dji_drone_models
+  expected <- c(m3e = 0.7, m3t = 3, m4e = 0.5, m4t = 0.7)
+  for (id in names(expected)) {
+    expect_equal(models[[id]]$min_photo_interval, expected[[id]], info = id)
+    expect_equal(min(models[[id]]$photo_intervals), expected[[id]], info = id)
+  }
+  expect_equal(models$m4e$photo_intervals, c(0.5, 0.7, 1, 2, 3, 5, 7, 10, 15, 20, 30, 60))
+  expect_equal(models$m4t$photo_intervals, c(0.7, 1, 2, 3, 5, 7, 10, 15, 20, 30, 60))
+  # A fast, low-overlap M4E plan may now use intervals below 1 s.
+  capture <- app_env$optimize_capture_settings(models$m4e, altitude_m = 30, front_overlap = 80)
+  expect_gte(capture$interval, 0.5)
+  expect_lte(capture$speed, models$m4e$max_speed)
+  expect_true(app_env$validate_model_capture_settings(models$m4e, capture$speed, capture$interval))
+  expect_error(app_env$validate_model_capture_settings(models$m4t, 5, 0.5), "below the 0.70 s minimum")
 })

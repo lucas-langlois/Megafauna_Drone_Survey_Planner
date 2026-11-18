@@ -1,0 +1,20 @@
+{
+  "source": "openAIP, OpenStreetMap runways, OurAirports runway ends, DJI FlySafe GEO zones",
+  "dji_downloaded": "2026-11-18",
+  "licence": "openAIP data CC BY-NC-SA (Data used comes from openAIP); runways (c) OpenStreetMap contributors, ODbL; DJI zones (c) DJI.",
+  "airspace_updated": "2026-08-14",
+  "airports_updated": "2026-11-10",
+  "downloaded": "2026-11-18",
+  "coastal_inland_m": 10000,
+  "rules": "CASA excluded-category / recreational standard operating conditions",
+  "counts": {
+    "aerodrome": 282,
+    "aerodrome_approach": 242,
+    "controlled_aerodrome": 26,
+    "controlled_approach": 27,
+    "controlled_approach_upper": 27,
+    "dji_restricted": 115,
+    "heliport": 33,
+    "restricted": 57
+  }
+}

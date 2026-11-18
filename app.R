@@ -37,6 +37,10 @@ library(leaflet.extras) # For draw tools
 library(zip)       # For KMZ creation
 
 source("pilot_radius.R", local = TRUE)
+source("airspace_check.R", local = TRUE)
+airspace_layer <- load_airspace_layer()
+source("land_mask.R", local = TRUE)
+land_mask <- load_land_mask()
 
 # Digital Earth Australia OGC Web Map Service. The tidal-composite layer's
 # default time is the latest published annual composite.
@@ -68,6 +72,8 @@ safe_export_name <- function(name) {
 ui <- fluidPage(
   useShinyjs(),  # Enable shinyjs
   tags$script(src = "export-downloads.js"),
+  tags$script(src = "sidebar-resize.js"),
+  tags$script(src = "busy-indicator.js"),
   tags$head(tags$style(HTML("
     .mission-metrics-panel {
       padding: 10px 12px;
@@ -97,14 +103,25 @@ ui <- fluidPage(
     }
     .mission-metric-label {
       color: #444;
+      white-space: nowrap;
+      flex: 0 0 auto;
+    }
+    .mission-metric-section.mission-metric-full {
+      grid-column: 1 / -1;
+      border-left: 0;
+      padding-left: 0;
+      border-top: 1px solid #ddd;
+      padding-top: 8px;
     }
     .mission-metric-value {
       font-weight: 600;
       text-align: right;
-      white-space: nowrap;
+      flex: 1 1 auto;
+      min-width: 0;
+      overflow-wrap: anywhere;
     }
     @media (max-width: 1100px) {
-      .mission-metrics-grid { grid-template-columns: 1fr; }
+      .mission-metrics-grid { grid-template-columns: minmax(0, 1fr); }
       .mission-metric-section + .mission-metric-section {
         border-left: 0;
         border-top: 1px solid #ddd;
@@ -126,239 +143,368 @@ ui <- fluidPage(
     .aoi-resize-panel .form-group {
       margin: 8px 0 4px;
     }
+    .route-limits-panel summary .fa { margin-right: 6px; color: #666; }
+    .route-limits-panel .route-limit-item { margin: 8px 0 0; font-size: 12px; color: #555; }
+    .route-limits-optional-label {
+      margin: 12px 0 0; font-size: 11px; font-weight: 700;
+      text-transform: uppercase; letter-spacing: .04em; color: #888;
+    }
+    .app-title h2 { margin: 10px 0 12px; font-size: 24px; }
+    #planner_sidebar { margin-bottom: 0; padding: 12px 14px; }
+    #sidebar_tabs { margin: 10px 0 12px; }
+    #sidebar_tabs > li > a { padding: 6px 11px; }
+    #planner_sidebar .tab-content h5 { font-weight: 700; margin-top: 4px; }
+    @media (min-width: 768px) {
+      /* Sidebar scrolls; the map keeps the full window height beside it. */
+      #planner_sidebar {
+        height: calc(100vh - 80px);
+        overflow-y: auto;
+      }
+    }
+    .sidebar-resizer {
+      position: absolute;
+      top: 0;
+      bottom: 0;
+      width: 8px;
+      cursor: col-resize;
+      z-index: 1000;
+      border-radius: 4px;
+    }
+    .sidebar-resizer:hover, body.sidebar-resizing .sidebar-resizer {
+      background: rgba(51, 122, 183, 0.35);
+    }
+    body.sidebar-resizing { cursor: col-resize; user-select: none; }
+    body.sidebar-resizing #map { pointer-events: none; }
+    .layers-toggle {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 10px;
+      font-weight: 700;
+      cursor: pointer;
+      user-select: none;
+      margin-bottom: 4px;
+    }
+    .layers-collapsed .layers-toggle { margin-bottom: 0; }
+    .layers-toggle-icon { font-size: 12px; color: #555; }
+    .route-legend { line-height: 18px; font-size: 12px; }
+    .route-legend .swatch {
+      display: inline-block; width: 26px; height: 0; margin-right: 6px;
+      vertical-align: middle;
+    }
+    .route-legend .swatch-survey { border-top: 3px solid #ff9800; }
+    .route-legend .swatch-transit { border-top: 2px dashed #555; }
+    #plan-busy {
+      position: absolute;
+      top: 12px;
+      left: 50%;
+      transform: translateX(-50%);
+      z-index: 1100;
+      display: none;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 14px;
+      border-radius: 16px;
+      background: rgba(33, 33, 33, 0.85);
+      color: #fff;
+      font-size: 13px;
+      font-weight: 600;
+      box-shadow: 0 1px 6px rgba(0, 0, 0, 0.3);
+      pointer-events: none;
+    }
+    #plan-busy.visible { display: flex; }
+    .plan-busy-spinner {
+      width: 14px;
+      height: 14px;
+      border: 2px solid rgba(255, 255, 255, 0.35);
+      border-top-color: #fff;
+      border-radius: 50%;
+      animation: plan-busy-spin 0.8s linear infinite;
+    }
+    @keyframes plan-busy-spin { to { transform: rotate(360deg); } }
+    .pilot-buttons { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 6px; }
+    .pilot-status { margin: 4px 0 6px; padding: 4px 0; font-size: 13px; }
+    .pilot-status.pilot-status-active {
+      padding: 6px 8px;
+      border-radius: 4px;
+      background: #fff3cd;
+      border: 1px solid #ffcf66;
+      font-weight: 600;
+    }
+    #map.placing-pilot, #map.placing-pilot .leaflet-interactive,
+    #map.placing-pilot.leaflet-grab { cursor: crosshair !important; }
+    .quick-summary {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+    }
+    .quick-chip {
+      flex: 1 1 auto;
+      min-width: 70px;
+      padding: 5px 8px;
+      border-radius: 4px;
+      background: #fff;
+      border: 1px solid #ddd;
+      line-height: 1.2;
+    }
+    .quick-chip .chip-label { display: block; font-size: 11px; color: #666; }
+    .quick-chip .chip-value { font-weight: 700; font-size: 14px; color: #222; }
+    .quick-chip.chip-ok { border-color: #81c784; background: #f1f8f1; }
+    .quick-chip.chip-warn { border-color: #ffb74d; background: #fff8ec; }
+    .quick-chip.chip-bad { border-color: #e57373; background: #fdf0f0; }
+    .quick-empty { color: #666; font-size: 13px; margin: 2px 0; }
   "))),
   
   # --- App Title ---
-  titlePanel("Megafauna Drone Survey Planner"),
+  div(class = "app-title", titlePanel("Megafauna Drone Survey Planner")),
 
   # --- Main Layout ---
+  # The sidebar scrolls on its own and the map fills the window height, so
+  # the map stays in view while settings are changed.
   sidebarLayout(
-    # --- Sidebar Panel for Inputs and Outputs ---
     sidebarPanel(
       width = 4,
-      h4("Mission Parameters"),
-      div(style = "display:flex;gap:8px;flex-wrap:wrap;",
-        actionButton("start_fresh", "Start fresh", icon = icon("refresh"),
-          title = "Clear the current plan and restore default settings"),
-        actionButton("clear_polygon", "Clear Polygon", icon = icon("trash"), class = "btn-danger")
-      ),
-      tags$p(class = "help-block", "Start fresh clears the current plan, pilot position and settings."),
-      p("Draw a polygon on the map to define the megafauna survey area. You can also import a KML polygon."),
+      id = "planner_sidebar",
+      uiOutput("quick_summary"),
+      tabsetPanel(
+        id = "sidebar_tabs",
+        type = "pills",
 
-      # --- KML Import ---
-      tags$hr(),
-      fileInput(
-        "kml_file",
-        "Import AOI or Previous Survey Plan (KML/KMZ)",
-        accept = c(".kml", ".kmz")
-      ),
-      tags$details(
-        class = "aoi-resize-panel",
-        tags$summary("Resize or rotate AOI"),
-        fluidRow(
-          column(
-            7,
-            numericInput("target_area", "Target area:", value = 1, min = 0.0001, step = 0.1)
+        # --- 1. Survey area ---
+        tabPanel(
+          "Area",
+          value = "area",
+          div(style = "display:flex;gap:8px;flex-wrap:wrap;",
+            actionButton("start_fresh", "Start fresh", icon = icon("refresh"),
+              title = "Clear the current plan and restore default settings"),
+            actionButton("clear_polygon", "Clear Polygon", icon = icon("trash"), class = "btn-danger")
           ),
-          column(
-            5,
-            selectInput(
-              "target_area_unit",
-              "Units:",
-              choices = c("Hectares" = "ha", "Acres" = "acres"),
-              selected = "ha"
+          tags$p(class = "help-block", "Start fresh clears the current plan, pilot position and settings."),
+          p("Draw a polygon on the map to define the megafauna survey area, or import one."),
+          fileInput(
+            "kml_file",
+            "Import AOI or Previous Survey Plan (KML/KMZ)",
+            accept = c(".kml", ".kmz")
+          ),
+          tags$details(
+            class = "aoi-resize-panel",
+            tags$summary("Resize or rotate AOI"),
+            fluidRow(
+              column(
+                7,
+                numericInput("target_area", "Target area:", value = 1, min = 0.0001, step = 0.1)
+              ),
+              column(
+                5,
+                selectInput(
+                  "target_area_unit",
+                  "Units:",
+                  choices = c("Hectares" = "ha", "Acres" = "acres"),
+                  selected = "ha"
+                )
+              )
+            ),
+            actionButton(
+              "resize_polygon_area",
+              "Apply Area Resize",
+              icon = icon("expand-arrows-alt"),
+              class = "btn-info btn-sm"
+            ),
+            tags$hr(style = "margin:10px 0;"),
+            sliderInput(
+              "polygon_rotation_angle",
+              "Rotation angle (degrees):",
+              min = -180,
+              max = 180,
+              value = 0,
+              step = 1,
+              ticks = TRUE,
+              width = "100%"
+            ),
+            tags$div(
+              style = paste(
+                "display:flex;justify-content:space-between;",
+                "margin:-8px 2px 8px;font-size:11px;color:#666;"
+              ),
+              tags$span("− Counter-clockwise"),
+              tags$span("+ Clockwise")
+            ),
+            actionButton(
+              "rotate_polygon",
+              "Rotate AOI",
+              icon = icon("sync-alt"),
+              class = "btn-info btn-sm"
+            ),
+            tags$div(
+              class = "help-block",
+              style = "margin:6px 0 0;font-size:12px;",
+              "Rotation uses the AOI centre. Afterwards, use the map Edit tool to move vertices or drag the whole AOI, then Save."
             )
+          ),
+          tags$details(
+            class = "aoi-resize-panel",
+            tags$summary("Distance measurement"),
+            tags$p(class = "help-block",
+              "Use the ruler control at the top-right of the map to measure from shore, the start point, or between any points. Results show metres with kilometres alongside. While drawing the survey polygon, the draw tooltip also shows metric area; the installed draw version does not show per-edge lengths."),
+            tags$p(class = "help-block",
+              "Measurements are separate from the survey area and mission calculations. Finish or delete a measurement with the control's own options; this never deletes the survey area.")
           )
         ),
-        actionButton(
-          "resize_polygon_area",
-          "Apply Area Resize",
-          icon = icon("expand-arrows-alt"),
-          class = "btn-info btn-sm"
-        ),
-        tags$hr(style = "margin:10px 0;"),
-        sliderInput(
-          "polygon_rotation_angle",
-          "Rotation angle (degrees):",
-          min = -180,
-          max = 180,
-          value = 0,
-          step = 1,
-          ticks = TRUE,
-          width = "100%"
-        ),
-        tags$div(
-          style = paste(
-            "display:flex;justify-content:space-between;",
-            "margin:-8px 2px 8px;font-size:11px;color:#666;"
+
+        # --- 2. Flight and camera ---
+        tabPanel(
+          "Flight",
+          value = "flight",
+          radioButtons(
+            "planning_basis",
+            "Set mission by:",
+            choices = c("Flight height" = "height", "Ground Sample Distance (GSD)" = "gsd"),
+            selected = "height"
           ),
-          tags$span("− Counter-clockwise"),
-          tags$span("+ Clockwise")
+          conditionalPanel(
+            condition = "input.planning_basis === 'height'",
+            numericInput("altitude", "Flight Height Above Home Point (meters):", value = 91.4, min = 10, max = 120, step = 0.1)
+          ),
+          conditionalPanel(
+            condition = "input.planning_basis === 'gsd'",
+            numericInput("target_gsd", "Target GSD (cm/pixel):", value = 2.43, min = 0.27, max = 3.20, step = 0.01)
+          ),
+          uiOutput("height_gsd_conversion_ui"),
+          uiOutput("auto_speed_ui"),
+          tags$hr(),
+          selectInput(
+            "drone_model",
+            "Drone Model:",
+            choices = c(
+              "DJI Mavic 3 Enterprise (M3E)" = "m3e",
+              "DJI Mavic 3 Thermal (M3T)" = "m3t",
+              "DJI Matrice 4 Enterprise (M4E)" = "m4e",
+              "DJI Matrice 4 Thermal (M4T)" = "m4t"
+            ),
+            selected = "m3e"
+          ),
+          uiOutput("camera_model_note"),
+          p(tags$b("Survey:"), "Megafauna (80% forward overlap / footprints edge-to-edge)"),
+          sliderInput("front_overlap", "Forward Overlap (%):", min = 0, max = 95, value = 80, step = 5),
+          tags$small(
+            "Maximum-efficiency capture is used automatically: the fastest feasible flight speed and calculated photo interval preserve the requested forward overlap."
+          ),
+          numericInput(
+            "transect_gap_m",
+            "Gap Between Adjacent Image Footprints (meters):",
+            value = 0,
+            min = 0,
+            step = 1
+          ),
+          tags$small("0 m places adjacent footprints edge-to-edge (0% sidelap). A larger gap creates negative sidelap.")
         ),
-        actionButton(
-          "rotate_polygon",
-          "Rotate AOI",
-          icon = icon("sync-alt"),
-          class = "btn-info btn-sm"
+
+        # --- 3. Route layout and limits ---
+        tabPanel(
+          "Route",
+          value = "route",
+          h5("Flight lines"),
+          sliderInput("transect_angle", "Transect Direction (degrees from North):", min = 0, max = 180, value = 0, step = 1),
+          actionButton("calc_optimal_direction", "Calculate Optimal Direction", icon = icon("compass"), class = "btn-info btn-sm"),
+          tags$div(style = "height:10px;"),
+          selectInput(
+            "polygon_alignment_axis",
+            "Align flight lines with polygon:",
+            choices = c(
+              "Top/bottom edges (long sides)" = "long",
+              "Side edges (short sides)" = "short"
+            ),
+            selected = "long"
+          ),
+          actionButton("align_polygon_edges", "Apply Polygon Alignment", icon = icon("arrows-alt"), class = "btn-info btn-sm"),
+          tags$div(style = "height:10px;"),
+          selectInput("start_corner", "Mission Start Point:",
+            choices = c(
+              "Top-Left (NW)" = "top_left",
+              "Top-Right (NE)" = "top_right",
+              "Bottom-Left (SW)" = "bottom_left",
+              "Bottom-Right (SE)" = "bottom_right"
+            ),
+            selected = "top_right"
+          ),
+          checkboxInput(
+            "reverse_transect_order",
+            "Reverse transect order (fly route backwards)",
+            value = FALSE
+          ),
+          tags$small(
+            "Moves START to the route's previous endpoint while keeping the same short connector legs."
+          ),
+          tags$hr(),
+          h5("Route limits"),
+          tags$details(
+            class = "aoi-resize-panel route-limits-panel",
+            tags$summary(icon("lock"), "Always applied: land and no-fly zones"),
+            tags$p(class = "route-limit-item", tags$b("Land excluded"), " (DEA land mask). ",
+              "Parts of transects over land, including islands, are removed. Transit legs between survey blocks may still cross land."),
+            tags$p(class = "route-limit-item", tags$b("No-fly zones avoided"), " (CASA, DJI GEO and GBRMPA). ",
+              "Parts of transects inside CASA no-fly zones (aerodrome approach and departure paths, controlled aerodromes, restricted areas), DJI GEO zones and GBRMPA drone exclusion areas at the current flight height are removed. Caution zones are not clipped. If a zone splits the area, the route flies around it or is exported as separate missions.")
+          ),
+          tags$div(class = "route-limits-optional-label", "Optional"),
+          checkboxInput(
+            "trim_transect_length",
+            "Trim oversized transects to 1.8 km",
+            value = FALSE
+          ),
+          tags$small(
+            "Longer lines are shortened around their midpoint. The map shows the resulting survey coverage; confirm actual visual line of sight from the pilot position."
+          ),
+          checkboxInput("limit_pilot_radius", "Stationary pilot: limit route to pilot radius", value = FALSE),
+          conditionalPanel(
+            condition = "input.limit_pilot_radius",
+            numericInput("pilot_distance_m", "Maximum Distance from Pilot (meters):", value = 900, min = 1, step = 1),
+            div(class = "pilot-buttons",
+              actionButton("place_pilot", "Place / move pilot on map", icon = icon("map-marker"),
+                class = "btn-sm"),
+              shinyjs::hidden(actionButton("cancel_place_pilot", "Cancel", icon = icon("xmark"),
+                class = "btn-sm")),
+              actionButton("remove_pilot", "Remove pilot", icon = icon("trash"), class = "btn-sm")
+            ),
+            div(id = "pilot_status_box", class = "pilot-status", textOutput("pilot_status")),
+            tags$small("Click Place / move pilot, then click the map. Remove pilot clears the marker so you can place it again; untick the option to stop limiting the route. Transects outside the radius are removed or shortened, reducing coverage. This distance limit is a planning aid; confirm actual visual line of sight and visibility of the complete route.")
+          ),
+          tags$hr(),
+          h5("Show on map"),
+          checkboxInput("show_transects", "Show Flight Transects (with numbered ends)", value = TRUE),
+          checkboxInput("show_photopoints", "Show Photo Points", value = FALSE),
+          checkboxInput("show_footprints", "Show Photo Footprints", value = FALSE)
         ),
-        tags$div(
-          class = "help-block",
-          style = "margin:6px 0 0;font-size:12px;",
-          "Rotation uses the AOI centre. Afterwards, use the map Edit tool to move vertices or drag the whole AOI, then Save."
+
+        # --- 4. Review and export ---
+        tabPanel(
+          "Review",
+          value = "review",
+          div(class = "well mission-metrics-panel", htmlOutput("mission_summary")),
+          tags$hr(),
+          h5("Export"),
+          textInput("export_name", "Export name (optional):", value = "",
+            placeholder = "e.g. Bowen_Site01"),
+          tags$p(class = "help-block", "Applied to all exports and files inside the Litchi bundle. File type, drone model and timestamp are added automatically."),
+          tags$button(id = "choose_export_folder", type = "button", class = "btn btn-default btn-sm",
+            "Choose export folder"),
+          tags$button(id = "clear_export_folder", type = "button", class = "btn btn-default btn-sm",
+            "Use browser downloads"),
+          tags$p(id = "export_folder_status", class = "help-block", role = "status",
+            `aria-live` = "polite", "Exports use your browser's download settings."),
+          tags$p(class = "help-block", "Folder selection depends on your browser. To choose a location for each export in other browsers, enable 'Ask where to save' in the browser's download settings."),
+          downloadButton("download_complete_plan", "Download complete plan", class = "btn-primary"),
+          tags$p(
+            class = "help-block",
+            "One ZIP includes the DJI KMZ, Litchi bundle, HTML plan summary, survey-area KML, and a README explaining each file."
+          )
         )
-      ),
-      tags$details(
-        class = "aoi-resize-panel",
-        tags$summary("Distance measurement"),
-        tags$p(class = "help-block",
-          "Use the ruler control at the top-right of the map to measure from shore, the start point, or between any points. Results show metres with kilometres alongside. While drawing the survey polygon, the draw tooltip also shows metric area; the installed draw version does not show per-edge lengths."),
-        tags$p(class = "help-block",
-          "Measurements are separate from the survey area and mission calculations. Finish or delete a measurement with the control's own options; this never deletes the survey area.")
-      ),
-      tags$br(), tags$br(),
-
-      # --- Flight Settings ---
-      h5("Flight Settings"),
-      radioButtons(
-        "planning_basis",
-        "Set mission by:",
-        choices = c("Flight height" = "height", "Ground Sample Distance (GSD)" = "gsd"),
-        selected = "height",
-        inline = TRUE
-      ),
-      conditionalPanel(
-        condition = "input.planning_basis === 'height'",
-        numericInput("altitude", "Flight Height Above Home Point (meters):", value = 91.4, min = 10, max = 120, step = 0.1)
-      ),
-      conditionalPanel(
-        condition = "input.planning_basis === 'gsd'",
-        numericInput("target_gsd", "Target GSD (cm/pixel):", value = 2.43, min = 0.27, max = 3.20, step = 0.01)
-      ),
-      uiOutput("height_gsd_conversion_ui"),
-      uiOutput("auto_speed_ui"),
-
-      # --- Drone Model & Overlap Settings ---
-      tags$hr(),
-      h5("Drone & Coverage Settings"),
-      selectInput(
-        "drone_model",
-        "Drone Model:",
-        choices = c(
-          "DJI Mavic 3 Enterprise (M3E)" = "m3e",
-          "DJI Mavic 3 Thermal (M3T)" = "m3t",
-          "DJI Matrice 4 Enterprise (M4E)" = "m4e",
-          "DJI Matrice 4 Thermal (M4T)" = "m4t"
-        ),
-        selected = "m3e"
-      ),
-      uiOutput("camera_model_note"),
-      p(tags$b("Survey:"), "Megafauna (80% forward overlap / footprints edge-to-edge)"),
-      sliderInput("front_overlap", "Forward Overlap (%):", min = 0, max = 95, value = 80, step = 5),
-      tags$small(
-        "Maximum-efficiency capture is used automatically: the fastest feasible flight speed and calculated photo interval preserve the requested forward overlap."
-      ),
-      numericInput(
-        "transect_gap_m",
-        "Gap Between Adjacent Image Footprints (meters):",
-        value = 0,
-        min = 0,
-        step = 1
-      ),
-      tags$small("0 m places adjacent footprints edge-to-edge (0% sidelap). A larger gap creates negative sidelap."),
-      checkboxInput(
-        "trim_transect_length",
-        "Trim oversized transects to 1.8 km",
-        value = FALSE
-      ),
-      tags$small(
-        "Longer lines are shortened around their midpoint. The map shows the resulting survey coverage; confirm actual visual line of sight from the pilot position."
-      ),
-      checkboxInput("limit_pilot_radius", "Stationary pilot: limit route to pilot radius", value = FALSE),
-      conditionalPanel(
-        condition = "input.limit_pilot_radius",
-        numericInput("pilot_distance_m", "Maximum Distance from Pilot (meters):", value = 900, min = 1, step = 1),
-        actionButton("place_pilot", "Place / move pilot on map", icon = icon("map-marker")),
-        actionButton("cancel_place_pilot", "Cancel placement"),
-        actionButton("remove_pilot_trim", "Remove pilot trim", icon = icon("undo")),
-        textOutput("pilot_status"),
-        tags$small("Click Place / move pilot, then click the map. Transects outside the radius are removed or shortened, reducing coverage. This distance limit is a planning aid; confirm actual visual line of sight and visibility of the complete route.")
-      ),
-
-      # --- Transect Direction ---
-      tags$hr(),
-      sliderInput("transect_angle", "Transect Direction (degrees from North):", min = 0, max = 180, value = 0, step = 1),
-      actionButton("calc_optimal_direction", "Calculate Optimal Direction", icon = icon("compass"), class = "btn-info"),
-      tags$br(), tags$br(),
-      selectInput(
-        "polygon_alignment_axis",
-        "Align flight lines with polygon:",
-        choices = c(
-          "Top/bottom edges (long sides)" = "long",
-          "Side edges (short sides)" = "short"
-        ),
-        selected = "long"
-      ),
-      actionButton("align_polygon_edges", "Apply Polygon Alignment", icon = icon("arrows-alt"), class = "btn-info"),
-      tags$br(), tags$br(),
-      selectInput("start_corner", "Mission Start Point:",
-        choices = c(
-          "Top-Left (NW)" = "top_left",
-          "Top-Right (NE)" = "top_right",
-          "Bottom-Left (SW)" = "bottom_left",
-          "Bottom-Right (SE)" = "bottom_right"
-        ),
-        selected = "top_right"
-      ),
-      checkboxInput(
-        "reverse_transect_order",
-        "Reverse transect order (fly route backwards)",
-        value = FALSE
-      ),
-      tags$small(
-        "Moves START to the route's previous endpoint while keeping the same short connector legs."
-      ),
-
-      # --- Display Options ---
-      tags$hr(),
-      checkboxInput("show_transects", "Show Flight Transects (with numbered ends)", value = TRUE),
-      checkboxInput("show_photopoints", "Show Photo Points", value = FALSE),
-      checkboxInput("show_footprints", "Show Photo Footprints", value = FALSE),
-
-      # --- Action Buttons ---
-      tags$hr(),
-      h4("Export settings"),
-      textInput("export_name", "Export name (optional):", value = "",
-        placeholder = "e.g. Bowen_Site01"),
-      tags$p(class = "help-block", "Applied to all exports and files inside the Litchi bundle. File type, drone model and timestamp are added automatically."),
-      tags$button(id = "choose_export_folder", type = "button", class = "btn btn-default",
-        "Choose export folder"),
-      tags$button(id = "clear_export_folder", type = "button", class = "btn btn-default",
-        "Use browser downloads"),
-      tags$p(id = "export_folder_status", class = "help-block", role = "status",
-        `aria-live` = "polite", "Exports use your browser's download settings."),
-      tags$p(class = "help-block", "Folder selection depends on your browser. To choose a location for each export in other browsers, enable 'Ask where to save' in the browser's download settings."),
-      downloadButton("download_complete_plan", "Download complete plan", class = "btn-primary"),
-      tags$p(
-        class = "help-block",
-        "One ZIP includes the DJI KMZ, Litchi bundle, HTML plan summary, survey-area KML, and a README explaining each file."
-      ),
-
-      # --- Calculated Outputs ---
-      tags$hr(),
-      h4("Calculated Mission Metrics"),
-      div(class = "well mission-metrics-panel", htmlOutput("mission_summary")),
-      tags$hr(),
-      tags$p(
-        class = "help-block",
-        tags$a("Check your planned flight in OK2Fly",
-          href = "https://ok2fly.com.au/", target = "_blank", rel = "noopener noreferrer")
       )
     ),
 
     # --- Main Panel for the Map ---
     mainPanel(
       width = 8,
-      leafletOutput("map", height = "85vh") # Make map taller
+      leafletOutput("map", height = "calc(100vh - 80px)")
     )
   )
 )
@@ -392,6 +538,7 @@ dji_drone_models <- list(
     payload_sub_enum = 0L, image_width = 5280L, image_height = 3956L,
     footprint_width_ratio = 17.3 / 12.3,
     footprint_height_ratio = 13.0 / 12.3,
+    # DJI Mavic 3E specs: JPEG timed 0.7/1/2/... s (JPEG + RAW needs 3 s).
     max_speed = 15, min_photo_interval = 0.7,
     photo_intervals = c(0.7, 1, 2, 3, 5, 7, 10, 15, 20, 30, 60),
     camera_note = "4/3 wide camera, 20 MP (5280 x 3956)"
@@ -402,6 +549,8 @@ dji_drone_models <- list(
     payload_sub_enum = 0L, image_width = 8000L, image_height = 6000L,
     footprint_width_ratio = unname(m3t_footprint_ratios[["width"]]),
     footprint_height_ratio = unname(m3t_footprint_ratios[["height"]]),
+    # DJI Mavic 3 Enterprise specs: M3T JPEG timed from 2 s, but 48 MP photos
+    # do not support 2 s, so 3 s is the minimum at this image size.
     max_speed = 15, min_photo_interval = 3,
     photo_intervals = c(3, 5, 7, 10, 15, 20, 30, 60),
     camera_note = "1/2-inch wide camera, 48 MP (8000 x 6000; minimum 3 s interval)"
@@ -412,8 +561,9 @@ dji_drone_models <- list(
     payload_sub_enum = 0L, image_width = 5280L, image_height = 3956L,
     footprint_width_ratio = 17.3 / 12.3,
     footprint_height_ratio = 13.0 / 12.3,
-    max_speed = 21, min_photo_interval = 1,
-    photo_intervals = c(1, 2, 3, 5, 7, 10, 15, 20, 30, 60),
+    # DJI Matrice 4 specs: JPEG interval 0.5/0.7/1/2/... s (JPEG + RAW needs 2 s).
+    max_speed = 21, min_photo_interval = 0.5,
+    photo_intervals = c(0.5, 0.7, 1, 2, 3, 5, 7, 10, 15, 20, 30, 60),
     camera_note = "4/3 wide camera, 20 MP (5280 x 3956)"
   ),
   m4t = list(
@@ -422,8 +572,9 @@ dji_drone_models <- list(
     payload_sub_enum = 0L, image_width = 8064L, image_height = 6048L,
     footprint_width_ratio = unname(m4t_footprint_ratios[["width"]]),
     footprint_height_ratio = unname(m4t_footprint_ratios[["height"]]),
-    max_speed = 21, min_photo_interval = 1,
-    photo_intervals = c(1, 2, 3, 5, 7, 10, 15, 20, 30, 60),
+    # DJI Matrice 4 specs: JPEG interval 0.7/1/2/... s.
+    max_speed = 21, min_photo_interval = 0.7,
+    photo_intervals = c(0.7, 1, 2, 3, 5, 7, 10, 15, 20, 30, 60),
     camera_note = "1/1.3-inch wide camera, 48 MP (8064 x 6048)"
   )
 )
@@ -1582,7 +1733,7 @@ write_plan_summary_html <- function(file, plan_data) {
 <style>
 :root{--navy:#123047;--teal:#16857b;--orange:#e27a16;--red:#c7352b;--ink:#17232d;--muted:#60717e;--line:#d8e1e7;--paper:#fff;--wash:#f3f7f9}*{box-sizing:border-box}body{margin:0;color:var(--ink);background:var(--wash);font:15px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}header{padding:28px clamp(18px,4vw,54px);color:#fff;background:linear-gradient(125deg,var(--navy),#155f78)}header h1{margin:0 0 5px;font-size:clamp(25px,4vw,38px)}header p{margin:0;opacity:.88}main{max-width:1500px;margin:auto;padding:22px}.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(165px,1fr));gap:12px;margin-bottom:18px}.card,.panel{background:var(--paper);border:1px solid var(--line);border-radius:12px;box-shadow:0 2px 9px #18394d10}.card{padding:15px 17px}.label{color:var(--muted);font-size:12px;font-weight:700;letter-spacing:.055em;text-transform:uppercase}.value{margin-top:4px;color:var(--navy);font-size:25px;font-weight:760}.sub{margin-top:2px;color:var(--muted);font-size:12px}.layout{display:grid;grid-template-columns:minmax(0,2.35fr) minmax(280px,1fr);gap:16px}.panel{padding:16px;margin-bottom:16px}h2{margin:0 0 11px;font-size:19px}.toolbar{display:flex;flex-wrap:wrap;gap:13px;margin-bottom:10px;color:var(--muted);font-size:13px}.toolbar label{display:flex;gap:5px;align-items:center}button{border:1px solid #b8c7d0;border-radius:7px;padding:6px 10px;background:#fff;cursor:pointer}#map{width:100%;height:min(68vh,720px);min-height:430px;display:block;border:1px solid #c9d5dc;border-radius:8px;background:#edf3f4;cursor:grab;touch-action:none}.aoi{fill:#1570a618;stroke:#1570a6;stroke-width:2;vector-effect:non-scaling-stroke}.route{fill:none;stroke:#8b99a2;stroke-width:1.2;stroke-dasharray:5 4;vector-effect:non-scaling-stroke}.transect{stroke:var(--orange);stroke-width:2.6;vector-effect:non-scaling-stroke}.footprint{fill:#2e9b7238;stroke:#16857b;stroke-width:.55;vector-effect:non-scaling-stroke}.photo{fill:var(--red);stroke:#fff;stroke-width:.6;vector-effect:non-scaling-stroke}.start{fill:var(--red);stroke:#fff;stroke-width:2;vector-effect:non-scaling-stroke}.end-label{fill:var(--navy);font-weight:800;font-size:13px;paint-order:stroke;stroke:#fff;stroke-width:3px;vector-effect:non-scaling-stroke}.legend{display:flex;flex-wrap:wrap;gap:13px;margin-top:8px;color:var(--muted);font-size:12px}.swatch{display:inline-block;width:13px;height:13px;margin-right:5px;border-radius:3px;vertical-align:-2px}.kv{display:grid;grid-template-columns:1fr auto;gap:7px 12px;padding:6px 0;border-bottom:1px solid #edf1f3}.kv span:first-child{color:var(--muted)}.note{color:#43545f;font-size:13px}@media(max-width:900px){.layout{grid-template-columns:1fr}#map{height:58vh}}@media print{body{background:#fff}main{max-width:none}.panel,.card{box-shadow:none}#map{height:520px}button{display:none}}
 </style></head><body><header><h1>Megafauna drone survey plan</h1><p id="subtitle"></p></header><main><section class="cards" id="cards"></section><div class="layout"><div><section class="panel"><h2>Planned survey route</h2><div class="toolbar"><label><input id="toggle-route" type="checkbox" checked> Route</label><label><input id="toggle-photos" type="checkbox" checked> Photo centres</label><label><input id="toggle-footprints" type="checkbox"> Image footprints</label><button id="reset-view">Reset view</button></div><svg id="map" role="img" aria-label="Map of planned survey transects and image footprints"></svg><div class="legend"><span><i class="swatch" style="background:#1570a633;border:1px solid #1570a6"></i>AOI</span><span><i class="swatch" style="background:#e27a16"></i>Transect</span><span><i class="swatch" style="background:#c7352b;border-radius:50%"></i>Photo centre</span><span><i class="swatch" style="background:#2e9b7260;border:1px solid #16857b"></i>Footprint</span></div><p class="note">Offline plan map. Scroll to zoom and drag to pan. Numbered labels mark transect ends.</p></section></div><aside><section class="panel"><h2>Mission settings</h2><div id="settings"></div></section><section class="panel"><h2>Planning notes</h2><div class="note" id="notes"></div></section></aside></div></main><script id="plan-data" type="application/json">__PAYLOAD__</script><script>
-const d=JSON.parse(document.getElementById("plan-data").textContent),m=d.metrics,fmt=(v,n=1)=>v==null?"—":Number(v).toFixed(n),trimStatus=m.trim_transect_length_enabled?(m.trimmed_transect_count>0?`${m.trimmed_transect_count} oversized ${m.trimmed_transect_count===1?"transect":"transects"} trimmed to ${fmt(m.transect_length_limit_km,2)} km; coverage reduced.`:`Enabled; no transects required trimming.`):"Off";document.getElementById("subtitle").textContent=`${d.drone_label} • generated ${d.generated_at} • ${d.transects.length} transects`;const cards=[["Area",fmt(m.area_ha,2)+" ha","survey polygon"],["Height",fmt(m.altitude_m,1)+" m","above home"],["Speed",fmt(m.speed_mps,1)+" m/s",m.optimisation_label],["Photo interval",fmt(m.photo_interval_s,2)+" s","timed capture"],["Forward overlap",fmt(m.forward_overlap_pct,1)+"%","selected survey setting"],["Sidelap",fmt(m.sidelap_pct,1)+"%",m.sidelap_pct<0?"negative sidelap (gap between swaths)":"adjacent footprints edge-to-edge"],["Footprint",fmt(m.footprint_width_m,1)+" × "+fmt(m.footprint_length_m,1)+" m","cross-track × along-track"],["Footprint gap",fmt(m.footprint_gap_m,1)+" m","between adjacent footprints"],["Longest transect",fmt(m.longest_transect_km,2)+" km",trimStatus],["Photos",m.photo_count,"planned centres"],["Route",fmt(m.route_distance_km,2)+" km",fmt(m.flight_time_min,1)+" min • "+m.batteries+" battery estimate"]];document.getElementById("cards").innerHTML=cards.map(c=>`<article class="card"><div class="label">${c[0]}</div><div class="value">${c[1]}</div><div class="sub">${c[2]}</div></article>`).join("");document.getElementById("settings").innerHTML=[["Drone",d.drone_label],["GSD",fmt(m.gsd_cm,2)+" cm/px"],["Forward overlap",fmt(m.forward_overlap_pct,1)+"%"],["Sidelap",fmt(m.sidelap_pct,1)+"%"],["Transect direction",fmt(m.transect_angle_deg,0)+"° from north"],["Mission start",m.start_corner],["Route order",m.reverse_order?"Reversed":"Standard"],["Transects",m.transect_count],["1.8 km trimming",trimStatus],["Stationary pilot radius",m.pilot_radius_enabled?fmt(m.pilot_radius_m,1)+" m":"Off"],["Pilot coordinates",d.pilot?fmt(d.pilot[1],6)+", "+fmt(d.pilot[0],6):"Not set"],["Capture optimisation",m.optimisation_label],["Expected photos",m.photo_count]].map(x=>`<div class="kv"><span>${x[0]}</span><span>${x[1]}</span></div>`).join("");document.getElementById("notes").innerHTML=`<p>The route and photo centres are generated from the selected AOI and current planner settings. The first image is triggered as each transect begins; interval capture is disabled on connector legs.</p><p>Forward overlap is the selected target for consecutive images along a transect. Sidelap describes adjacent image swaths: 0% means edge-to-edge coverage, and a negative value means a gap between swaths. Sidelap is calculated from the footprint gap, planned flight height and camera geometry.</p><p>${trimStatus}</p><p>${m.pilot_radius_enabled?`Survey lines are clipped to ${fmt(m.pilot_radius_m,1)} m from the stationary pilot, reducing coverage. Confirm actual visual line of sight; the radius is a planning aid.`:"Stationary pilot radius limit is off."}</p><p>Flight time is route distance divided by planned speed and excludes take-off, landing, turns, acceleration, wind and operational delays. Battery count uses ${m.battery_minutes} usable minutes per battery.</p><p>Review the exported route, home point, altitude reference, obstacles, lighting, shutter speed, wind and regulatory requirements before flight.</p>`;
+const d=JSON.parse(document.getElementById("plan-data").textContent),m=d.metrics,fmt=(v,n=1)=>v==null?"—":Number(v).toFixed(n),trimStatus=m.trim_transect_length_enabled?(m.trimmed_transect_count>0?`${m.trimmed_transect_count} oversized ${m.trimmed_transect_count===1?"transect":"transects"} trimmed to ${fmt(m.transect_length_limit_km,2)} km; coverage reduced.`:`Enabled; no transects required trimming.`):"Off";document.getElementById("subtitle").textContent=`${d.drone_label} • generated ${d.generated_at} • ${d.transects.length} transects`;const cards=[["Area",fmt(m.area_ha,2)+" ha","survey polygon"],["Height",fmt(m.altitude_m,1)+" m","above home"],["Speed",fmt(m.speed_mps,1)+" m/s",m.optimisation_label],["Photo interval",fmt(m.photo_interval_s,2)+" s","timed capture"],["Forward overlap",fmt(m.forward_overlap_pct,1)+"%","selected survey setting"],["Sidelap",fmt(m.sidelap_pct,1)+"%",m.sidelap_pct<0?"negative sidelap (gap between swaths)":"adjacent footprints edge-to-edge"],["Footprint",fmt(m.footprint_width_m,1)+" × "+fmt(m.footprint_length_m,1)+" m","cross-track × along-track"],["Footprint gap",fmt(m.footprint_gap_m,1)+" m","between adjacent footprints"],["Longest transect",fmt(m.longest_transect_km,2)+" km",trimStatus],["Photos",m.photo_count,"planned centres"],["Route",fmt(m.route_distance_km,2)+" km",fmt(m.flight_time_min,1)+" min • "+m.batteries+" battery estimate"]];document.getElementById("cards").innerHTML=cards.map(c=>`<article class="card"><div class="label">${c[0]}</div><div class="value">${c[1]}</div><div class="sub">${c[2]}</div></article>`).join("");document.getElementById("settings").innerHTML=[["Drone",d.drone_label],["GSD",fmt(m.gsd_cm,2)+" cm/px"],["Forward overlap",fmt(m.forward_overlap_pct,1)+"%"],["Sidelap",fmt(m.sidelap_pct,1)+"%"],["Transect direction",fmt(m.transect_angle_deg,0)+"° from north"],["Mission start",m.start_corner],["Route order",m.reverse_order?"Reversed":"Standard"],["Transects",m.transect_count],["1.8 km trimming",trimStatus],["Stationary pilot radius",m.pilot_radius_enabled?fmt(m.pilot_radius_m,1)+" m":"Off"],["Pilot coordinates",d.pilot?fmt(d.pilot[1],6)+", "+fmt(d.pilot[0],6):"Not set"],["Land exclusion",m.land_clip_summary||"Not recorded"],["No-fly clipping",m.airspace_clip_summary||"Not recorded"],["Airspace check",m.airspace_summary?[...(m.airspace_findings||[]),m.airspace_summary].map(s=>String(s).replace(/[&<>"]/g,c=>"&#"+c.charCodeAt(0)+";")).join("<br>"):"Not recorded"],["Capture optimisation",m.optimisation_label],["Expected photos",m.photo_count]].map(x=>`<div class="kv"><span>${x[0]}</span><span>${x[1]}</span></div>`).join("");document.getElementById("notes").innerHTML=`<p>The route and photo centres are generated from the selected AOI and current planner settings. The first image is triggered as each transect begins; interval capture is disabled on connector legs.</p><p>Forward overlap is the selected target for consecutive images along a transect. Sidelap describes adjacent image swaths: 0% means edge-to-edge coverage, and a negative value means a gap between swaths. Sidelap is calculated from the footprint gap, planned flight height and camera geometry.</p><p>${trimStatus}</p><p>${m.pilot_radius_enabled?`Survey lines are clipped to ${fmt(m.pilot_radius_m,1)} m from the stationary pilot, reducing coverage. Confirm actual visual line of sight; the radius is a planning aid.`:"Stationary pilot radius limit is off."}</p><p>Flight time is route distance divided by planned speed and excludes take-off, landing, turns, acceleration, wind and operational delays. Battery count uses ${m.battery_minutes} usable minutes per battery.</p><p>Review the exported route, home point, altitude reference, obstacles, lighting, shutter speed, wind and regulatory requirements before flight.</p>`;
 const R=6378137,all=[...d.aoi,...d.transects.flat(),...d.photo_points.map(p=>p.center)],lon0=all.reduce((s,p)=>s+p[0],0)/all.length,lat0=all.reduce((s,p)=>s+p[1],0)/all.length,rad=Math.PI/180,xy=p=>[(p[0]-lon0)*rad*R*Math.cos(lat0*rad),(p[1]-lat0)*rad*R],aoi=d.aoi.map(xy),lines=d.transects.map(t=>t.map(xy)),photos=d.photo_points.map(p=>({...p,xy:xy(p.center)})),points=[...aoi,...lines.flat(),...(d.pilot_boundary||[]).map(xy)],xs=points.map(p=>p[0]),ys=points.map(p=>-p[1]),minX=Math.min(...xs),maxX=Math.max(...xs),minY=Math.min(...ys),maxY=Math.max(...ys),pad=Math.max(maxX-minX,maxY-minY)*.05,home={x:minX-pad,y:minY-pad,w:maxX-minX+2*pad,h:maxY-minY+2*pad};let view={...home};const svg=document.getElementById("map"),ns="http://www.w3.org/2000/svg",setView=()=>svg.setAttribute("viewBox",`${view.x} ${view.y} ${view.w} ${view.h}`);setView();const group=id=>{const g=document.createElementNS(ns,"g");g.id=id;svg.appendChild(g);return g},aoiG=group("aoi"),routeG=group("route"),fpG=group("footprints"),photoG=group("photos");const poly=(g,pts,cls)=>{const e=document.createElementNS(ns,"polygon");e.setAttribute("points",pts.map(p=>`${p[0]},${-p[1]}`).join(" "));e.setAttribute("class",cls);g.appendChild(e)};poly(aoiG,aoi,"aoi");if(d.pilot){const boundary=document.createElementNS(ns,"polygon");boundary.setAttribute("points",d.pilot_boundary.map(xy).map(p=>`${p[0]},${-p[1]}`).join(" "));boundary.setAttribute("fill","#7b329410");boundary.setAttribute("stroke","#7b3294");boundary.setAttribute("stroke-width","2");boundary.setAttribute("stroke-dasharray","6 4");boundary.setAttribute("vector-effect","non-scaling-stroke");aoiG.appendChild(boundary);const p=xy(d.pilot),marker=document.createElementNS(ns,"circle");marker.setAttribute("cx",p[0]);marker.setAttribute("cy",-p[1]);marker.setAttribute("r",Math.max(home.w,home.h)*.006);marker.setAttribute("fill","#7b3294");aoiG.appendChild(marker);const label=document.createElementNS(ns,"text");label.setAttribute("x",p[0]);label.setAttribute("y",-p[1]);label.setAttribute("class","end-label");label.textContent="Pilot";aoiG.appendChild(label)}const routePts=[];lines.forEach((line,i)=>{routePts.push(...line);const e=document.createElementNS(ns,"line");e.setAttribute("x1",line[0][0]);e.setAttribute("y1",-line[0][1]);e.setAttribute("x2",line.at(-1)[0]);e.setAttribute("y2",-line.at(-1)[1]);e.setAttribute("class","transect");routeG.appendChild(e);const t=document.createElementNS(ns,"text");t.setAttribute("x",line.at(-1)[0]);t.setAttribute("y",-line.at(-1)[1]);t.setAttribute("class","end-label");t.textContent=String(i+1);routeG.appendChild(t)});const route=document.createElementNS(ns,"polyline");route.setAttribute("points",routePts.map(p=>`${p[0]},${-p[1]}`).join(" "));route.setAttribute("class","route");routeG.insertBefore(route,routeG.firstChild);const s=document.createElementNS(ns,"circle");s.setAttribute("cx",lines[0][0][0]);s.setAttribute("cy",-lines[0][0][1]);s.setAttribute("r",Math.max(home.w,home.h)*.007);s.setAttribute("class","start");routeG.appendChild(s);photos.forEach(p=>{const th=p.bearing*rad,u=[Math.sin(th),Math.cos(th)],v=[Math.cos(th),-Math.sin(th)],hw=m.footprint_width_m/2,hh=m.footprint_length_m/2,c=p.xy,corners=[[-hh,-hw],[hh,-hw],[hh,hw],[-hh,hw]].map(q=>[c[0]+q[0]*u[0]+q[1]*v[0],c[1]+q[0]*u[1]+q[1]*v[1]]);poly(fpG,corners,"footprint");const e=document.createElementNS(ns,"circle");e.setAttribute("cx",c[0]);e.setAttribute("cy",-c[1]);e.setAttribute("r",Math.max(home.w,home.h)*.0018);e.setAttribute("class","photo");photoG.appendChild(e)});fpG.style.display="none";document.getElementById("toggle-route").onchange=e=>routeG.style.display=e.target.checked?"":"none";document.getElementById("toggle-photos").onchange=e=>photoG.style.display=e.target.checked?"":"none";document.getElementById("toggle-footprints").onchange=e=>fpG.style.display=e.target.checked?"":"none";document.getElementById("reset-view").onclick=()=>{view={...home};setView()};svg.addEventListener("wheel",e=>{e.preventDefault();const r=svg.getBoundingClientRect(),mx=view.x+(e.clientX-r.left)/r.width*view.w,my=view.y+(e.clientY-r.top)/r.height*view.h,f=e.deltaY>0?1.18:.84;view.x=mx-(mx-view.x)*f;view.y=my-(my-view.y)*f;view.w*=f;view.h*=f;setView()},{passive:false});let drag=null;svg.addEventListener("pointerdown",e=>{drag={x:e.clientX,y:e.clientY,v:{...view}};svg.setPointerCapture(e.pointerId)});svg.addEventListener("pointermove",e=>{if(!drag)return;const r=svg.getBoundingClientRect();view.x=drag.v.x-(e.clientX-drag.x)/r.width*drag.v.w;view.y=drag.v.y-(e.clientY-drag.y)/r.height*drag.v.h;setView()});svg.addEventListener("pointerup",()=>drag=null);
 </script></body></html>'
   writeLines(sub("__PAYLOAD__", payload, template, fixed = TRUE), file,
@@ -1852,6 +2003,10 @@ read_survey_plan_upload <- function(upload_path, original_name) {
 # Server Logic
 # ==============================================================================
 server <- function(input, output, session) {
+  # Land exclusion and no-fly clipping are always applied. The inputs no
+  # longer exist in the UI; tests can still switch them off explicitly.
+  exclude_land_on <- function() !identical(input$exclude_land, FALSE)
+  avoid_no_fly_on <- function() !identical(input$avoid_no_fly_zones, FALSE)
   export_filename <- function(kind, extension, default,
                               timestamp = format(Sys.time(), "%Y%m%d_%H%M%S")) {
     name <- safe_export_name(input$export_name)
@@ -1874,6 +2029,18 @@ server <- function(input, output, session) {
     placing_pilot(TRUE)
   })
   observeEvent(input$cancel_place_pilot, placing_pilot(FALSE))
+  observeEvent(input$remove_pilot, {
+    placing_pilot(FALSE)
+    pilot_point(NULL)
+  })
+  # Make placement mode visible: crosshair over the map, highlighted message,
+  # and a Cancel button only while waiting for the click.
+  observe({
+    placing <- isTRUE(placing_pilot())
+    shinyjs::toggle("cancel_place_pilot", condition = placing)
+    shinyjs::toggleClass("map", "placing-pilot", condition = placing)
+    shinyjs::toggleClass("pilot_status_box", "pilot-status-active", condition = placing)
+  })
   observeEvent(input$remove_pilot_trim, {
     placing_pilot(FALSE)
     updateCheckboxInput(session, "limit_pilot_radius", value = FALSE)
@@ -1888,7 +2055,7 @@ server <- function(input, output, session) {
     placing_pilot(FALSE)
   })
   output$pilot_status <- renderText({
-    if (placing_pilot()) return("Click the map to place the stationary pilot.")
+    if (placing_pilot()) return("Click the map to place the stationary pilot (or press Cancel).")
     point <- pilot_point()
     if (is.null(point)) return("Place the pilot to generate a route within the selected radius.")
     sprintf("Pilot: %.6f, %.6f (latitude, longitude). Radius: %s m.",
@@ -1968,7 +2135,8 @@ server <- function(input, output, session) {
     tags$p(
       class = "help-block",
       style = "margin-top:-8px;",
-      paste0(cam$camera_note, "; DJI waypoint maximum: ", cam$max_speed, " m/s.")
+      paste0(cam$camera_note, "; DJI waypoint maximum: ", cam$max_speed,
+        " m/s. Photo intervals assume JPEG only (not JPEG + RAW).")
     )
   })
   
@@ -2485,12 +2653,52 @@ server <- function(input, output, session) {
         attribution = dea_attribution
       ) %>%
       setView(lng = 146.8169, lat = -19.2590, zoom = 7) %>% # Center on Townsville, showing entire QLD coast
+      add_airspace_layers(airspace_layer) %>%
       addLayersControl(
         baseGroups = c(
           "Satellite", "Street Map", "DEA Low Tide", "DEA High Tide",
           "DEA Intertidal Extent (2024)"
         ),
+        overlayGroups = airspace_overlay_groups(airspace_layer),
         options = layersControlOptions(collapsed = FALSE)
+      ) %>%
+      addControl(
+        html = HTML(paste0(
+          "<div><span class='swatch swatch-survey'></span>Survey line (photos)</div>",
+          "<div><span class='swatch swatch-transit'></span>Transit (no photos)</div>"
+        )),
+        position = "bottomright",
+        layerId = "route-legend",
+        className = "info legend route-legend"
+      ) %>%
+      # The layer box starts collapsed; click the "Map layers" header to
+      # expand or collapse it.
+      htmlwidgets::onRender(
+        "function(el, x) {
+          var box = el.querySelector('.leaflet-control-layers');
+          if (!box || box.querySelector('.layers-toggle')) return;
+          var list = box.querySelector('.leaflet-control-layers-list');
+          var head = document.createElement('div');
+          head.className = 'layers-toggle';
+          head.setAttribute('role', 'button');
+          head.setAttribute('tabindex', '0');
+          head.innerHTML = '<span class=\"layers-toggle-label\">Map layers</span><span class=\"layers-toggle-icon\"></span>';
+          box.insertBefore(head, box.firstChild);
+          L.DomEvent.disableClickPropagation(head);
+          var collapsed = true;
+          function set(value) {
+            collapsed = value;
+            list.style.display = value ? 'none' : '';
+            head.querySelector('.layers-toggle-icon').textContent = value ? '\\u25B8' : '\\u25BE';
+            head.setAttribute('aria-expanded', value ? 'false' : 'true');
+            box.classList.toggle('layers-collapsed', value);
+          }
+          head.addEventListener('click', function () { set(!collapsed); });
+          head.addEventListener('keydown', function (event) {
+            if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); set(!collapsed); }
+          });
+          set(collapsed);
+        }"
       ) %>%
       addControl(
         html = HTML(paste0(
@@ -2538,9 +2746,79 @@ server <- function(input, output, session) {
 
 
   # --- Helper: Generate Transects and Photo Points ---
+  # Orders transects for flight (start corner, optional reversal). With no-fly
+  # clipping on, the order is rearranged block by block, with detours, so no
+  # connecting leg crosses a no-fly zone.
+  # Small per-session cache: the map, summary bar, metrics and exports ask for
+  # the same plan, so compute it once per distinct set of inputs.
+  plan_cache <- new.env(parent = emptyenv())
+  cached <- function(kind, key_parts, compute) {
+    key <- paste0(kind, ":", rlang::hash(key_parts))
+    if (exists(key, envir = plan_cache, inherits = FALSE)) return(get(key, envir = plan_cache))
+    value <- compute()
+    if (length(ls(plan_cache)) > 20) rm(list = ls(plan_cache), envir = plan_cache)
+    assign(key, value, envir = plan_cache)
+    value
+  }
+
+  order_route <- function(transects, start_corner, angle, mission = NULL) {
+    cached("route", list(transects, start_corner, angle, mission, input$reverse_transect_order,
+                         avoid_no_fly_on(), mission_altitude()),
+           function() order_route_uncached(transects, start_corner, angle, mission))
+  }
+
+  order_route_uncached <- function(transects, start_corner, angle, mission = NULL) {
+    order_fn <- function(x) apply_reverse_transect_order(
+      reorder_transects_by_start(x, start_corner, angle), input$reverse_transect_order)
+    ordered <- order_fn(transects)
+    if (avoid_no_fly_on()) {
+      ordered <- route_around_zones(airspace_layer, ordered, mission_altitude())
+    }
+    if (!is.null(mission)) {
+      routed <- attr(ordered, "airspace_route")
+      keep <- route_mission_of(ordered) == mission
+      ordered <- ordered[keep]
+      if (!is.null(routed)) {
+        routed$mission <- routed$mission[keep]
+        attr(ordered, "airspace_route") <- routed
+      }
+    }
+    ordered
+  }
+  route_mission_of <- function(ordered) {
+    mission <- (attr(ordered, "airspace_route") %||% list())$mission
+    if (length(mission) == length(ordered)) mission else rep(1L, length(ordered))
+  }
+  # Route metrics summed over missions; the gap between separate missions is
+  # not flown, so it is not counted.
+  measure_route_by_mission <- function(ordered) {
+    parts <- lapply(split(seq_along(ordered), route_mission_of(ordered)),
+                    function(ix) measure_transect_route(ordered[ix]))
+    if (length(parts) == 1L) return(parts[[1]])
+    out <- parts[[1]]
+    for (name in c("route_distance_m", "survey_distance_m", "connector_distance_m")) {
+      out[[name]] <- sum(vapply(parts, function(p) p[[name]], 0))
+    }
+    out$transect_lengths_m <- unlist(lapply(parts, function(p) p$transect_lengths_m))
+    out$longest_transect_m <- max(vapply(parts, function(p) p$longest_transect_m, 0))
+    out
+  }
+
   generate_transects_and_photopoints <- function(poly_df, altitude, transect_gap_m,
                                                   cam, transect_angle = 0,
                                                   trim_long_transects = FALSE) {
+    radius_on <- isTRUE(input$limit_pilot_radius)
+    cached("transects", list(poly_df, altitude, transect_gap_m, cam, transect_angle,
+                             trim_long_transects, radius_on,
+                             if (radius_on) list(pilot_point(), input$pilot_distance_m),
+                             exclude_land_on(), avoid_no_fly_on()),
+           function() generate_transects_uncached(poly_df, altitude, transect_gap_m, cam,
+                                                  transect_angle, trim_long_transects))
+  }
+
+  generate_transects_uncached <- function(poly_df, altitude, transect_gap_m,
+                                          cam, transect_angle = 0,
+                                          trim_long_transects = FALSE) {
     # Returns list(transects = list of matrices), photo_points = list of matrices
     if (isTRUE(input$limit_pilot_radius) && is.null(pilot_point())) {
       return(list(transects = list(), photo_points = list(),
@@ -2655,6 +2933,18 @@ server <- function(input, output, session) {
     if (isTRUE(input$limit_pilot_radius)) {
       transects <- clip_transects_to_pilot_radius(transects, pilot_point(), pilot_distance())
     }
+    land_clip <- list(enabled = FALSE, affected = 0L, removed_m = 0)
+    if (exclude_land_on()) {
+      transects <- clip_transects_off_land(land_mask, transects)
+      land_clip <- c(list(enabled = TRUE), attr(transects, "land_clip"))
+      attr(transects, "land_clip") <- NULL
+    }
+    airspace_clip <- list(enabled = FALSE, affected = 0L, removed_m = 0)
+    if (avoid_no_fly_on()) {
+      transects <- clip_transects_outside_airspace(airspace_layer, transects, altitude)
+      airspace_clip <- c(list(enabled = TRUE), attr(transects, "airspace_clip"))
+      attr(transects, "airspace_clip") <- NULL
+    }
     # Apply midpoint trimming after radius clipping so enabling both controls
     # does not discard useful coverage near an off-centre pilot.
     if (isTRUE(trim_long_transects)) {
@@ -2668,6 +2958,8 @@ server <- function(input, output, session) {
       transects = transects,
       photo_points = photo_points,
       trimmed_transect_count = trimmed_transect_count,
+      airspace_clip = airspace_clip,
+      land_clip = land_clip,
       original_longest_transect_m = if (length(original_transect_lengths_m) > 0) {
         max(original_transect_lengths_m)
       } else 0
@@ -2698,18 +2990,18 @@ server <- function(input, output, session) {
       input$trim_transect_length
     )
     validate(need(length(result$transects) > 0,
-      if (isTRUE(input$limit_pilot_radius)) "Place the pilot so the selected radius overlaps the survey transects."
+      if (isTRUE(result$land_clip$enabled) && result$land_clip$affected > 0 &&
+          !isTRUE(result$airspace_clip$affected > 0))
+        "The whole survey area is on land; no transects remain after land exclusion."
+      else if (isTRUE(result$airspace_clip$enabled) && result$airspace_clip$affected > 0)
+        "The whole survey area lies inside no-fly zones; no transects remain after clipping."
+      else if (isTRUE(input$limit_pilot_radius)) "Place the pilot so the selected radius overlaps the survey transects."
       else "No survey transects were generated."))
 
     start_corner <- if (is.null(input$start_corner)) "top_left" else input$start_corner
-    ordered_transects <- reorder_transects_by_start(
-      result$transects, start_corner, angle
-    )
-    ordered_transects <- apply_reverse_transect_order(
-      ordered_transects, input$reverse_transect_order
-    )
+    ordered_transects <- order_route(result$transects, start_corner, angle)
 
-    route_metrics <- measure_transect_route(ordered_transects)
+    route_metrics <- measure_route_by_mission(ordered_transects)
     route_distance_m <- route_metrics$route_distance_m
 
     photo_points_by_transect <- generate_photo_points_for_transects(
@@ -2736,6 +3028,11 @@ server <- function(input, output, session) {
       bottom_left = "Bottom left", bottom_right = "Bottom right"
     )
     optimisation_label <- "Maximum efficiency"
+    # With clipping on, the AOI may still overlap zones; only the flown route
+    # (transects plus connectors) matters.
+    airspace <- check_airspace(airspace_layer, aoi_coords, ordered_transects, altitude,
+                               include_aoi = !isTRUE(result$airspace_clip$enabled))
+    airspace_findings <- airspace$findings
 
     list(
       generated_at = format(Sys.time(), "%Y-%m-%d %H:%M %Z"),
@@ -2785,12 +3082,59 @@ server <- function(input, output, session) {
         battery_minutes = assumed_battery_minutes,
         transect_angle_deg = angle,
         start_corner = unname(start_labels[[start_corner]]),
-        reverse_order = isTRUE(input$reverse_transect_order)
+        reverse_order = isTRUE(input$reverse_transect_order),
+        airspace_status = airspace$status,
+        airspace_summary = airspace_summary_text(airspace),
+        land_clip_enabled = isTRUE(result$land_clip$enabled),
+        land_clip_affected = as.integer(result$land_clip$affected %||% 0L),
+        land_clip_removed_km = (result$land_clip$removed_m %||% 0) / 1000,
+        land_clip_summary = if (!isTRUE(result$land_clip$enabled)) {
+          "Land exclusion off."
+        } else if ((result$land_clip$affected %||% 0L) == 0L) {
+          "Land exclusion on; no transects crossed land."
+        } else {
+          sprintf("Land exclusion on; %d transect%s cut at the coast (%.2f km over land removed).",
+                  result$land_clip$affected, if (result$land_clip$affected == 1L) "" else "s",
+                  result$land_clip$removed_m / 1000)
+        },
+        airspace_clip_enabled = isTRUE(result$airspace_clip$enabled),
+        mission_count = length(unique(route_mission_of(ordered_transects))),
+        airspace_clip_affected = as.integer(result$airspace_clip$affected %||% 0L),
+        airspace_clip_removed_km = (result$airspace_clip$removed_m %||% 0) / 1000,
+        airspace_clip_summary = if (!isTRUE(result$airspace_clip$enabled)) {
+          "No-fly clipping off."
+        } else if (result$airspace_clip$affected == 0L) {
+          "No-fly clipping on; no transects touched a no-fly zone."
+        } else {
+          routed <- attr(ordered_transects, "airspace_route") %||% list(blocks = 1L, detours = 0L, detour_m = 0)
+          paste0(
+            sprintf("No-fly clipping on; %d transect%s shortened or removed (%.2f km of survey line cut).",
+                    result$airspace_clip$affected,
+                    if (result$airspace_clip$affected == 1L) "" else "s",
+                    result$airspace_clip$removed_m / 1000),
+            if (routed$detours > 0) sprintf(
+              " Route flies %d separate blocks, with %d detour%s around no-fly zones (%.2f km extra).",
+              routed$blocks, routed$detours, if (routed$detours == 1L) "" else "s",
+              routed$detour_m / 1000) else "",
+            if ((routed$missions %||% 1L) > 1L) sprintf(
+              " No-fly zones split the area into %d parts that cannot be joined by a short detour: they are exported as %d separate missions, to fly as separate flights.",
+              routed$missions, routed$missions) else "")
+        },
+        airspace_dji_count = sum(airspace_findings$severity == "dji-block"),
+        airspace_no_fly_count = sum(airspace_findings$severity == "no-fly"),
+        airspace_caution_count = sum(airspace_findings$severity == "caution"),
+        # Plain text; the summary page and panel escape it before display.
+        airspace_findings = as.list(sprintf(
+          "%s: %s. %s",
+          c(`dji-block` = "DJI WILL STOP", `no-fly` = "CASA NO-FLY", caution = "Caution")[
+            airspace_findings$severity],
+          airspace_findings$name, airspace_findings$detail
+        ))
       )
     )
   })
 
-  litchi_native_plan <- reactive({
+  litchi_native_plan_for <- function(mission = NULL) {
     poly_df <- drawn_polygon()
     req(!is.null(poly_df), nrow(poly_df) >= 3)
     req(input$front_overlap, input$transect_gap_m)
@@ -2806,17 +3150,13 @@ server <- function(input, output, session) {
     validate(need(length(result$transects) > 0, "No survey transects were generated."))
 
     start_corner <- if (is.null(input$start_corner)) "top_left" else input$start_corner
-    ordered_transects <- reorder_transects_by_start(
-      result$transects, start_corner, angle
-    )
-    ordered_transects <- apply_reverse_transect_order(
-      ordered_transects, input$reverse_transect_order
-    )
+    ordered_transects <- order_route(result$transects, start_corner, angle, mission)
     build_litchi_native_plan(
       ordered_transects, altitude, speed, capture_settings()$interval,
       selected_drone()
     )
-  })
+  }
+  litchi_native_plan <- reactive(litchi_native_plan_for())
 
   # --- Reactive Observer to Update Map with Drawn Polygon, Transects, and Photo Points ---
   observeEvent(
@@ -2872,10 +3212,8 @@ server <- function(input, output, session) {
           
           # Reorder transects based on start corner
           start_corner <- if (is.null(input$start_corner)) "top_left" else input$start_corner
-          transects_display <- reorder_transects_by_start(res$transects, start_corner, angle)
-          transects_display <- apply_reverse_transect_order(
-            transects_display, input$reverse_transect_order
-          )
+          transects_display <- order_route(res$transects, start_corner, angle)
+          display_mission <- route_mission_of(transects_display)
           photo_points_display <- generate_photo_points_for_transects(
             transects_display, capture_settings()$actual_spacing_m
           )
@@ -2884,11 +3222,13 @@ server <- function(input, output, session) {
           if (input$show_transects && length(transects_display) > 0) {
             for (i in seq_along(transects_display)) {
               coords <- transects_display[[i]]
-              # Draw transect line (solid orange)
-              map_proxy %>% addPolylines(lng = coords[,1], lat = coords[,2], color = "orange", weight = 2, group = "transects")
+              # Survey leg, photos taken: solid orange
+              map_proxy %>% addPolylines(lng = coords[,1], lat = coords[,2], color = "#ff9800",
+                weight = 3, opacity = 1, group = "transects")
               
-              # Draw connection to next transect (solid orange line)
-              if (i < length(transects_display)) {
+              # Transit leg to the next transect, no photos: thin dashed white
+              if (i < length(transects_display) &&
+                  display_mission[i + 1] == display_mission[i]) {
                 next_coords <- transects_display[[i + 1]]
                 # Connect end of current transect to start of next transect
                 connection <- matrix(c(
@@ -2898,12 +3238,25 @@ server <- function(input, output, session) {
                 map_proxy %>% addPolylines(
                   lng = connection[,1], 
                   lat = connection[,2], 
-                  color = "orange", 
+                  color = "#ffffff", 
                   weight = 2, 
+                  opacity = 0.9,
+                  dashArray = "5 5",
                   group = "transects"
                 )
               }
               
+              if (i > 1 && display_mission[i] != display_mission[i - 1]) {
+                map_proxy %>% addCircleMarkers(lng = coords[1, 1], lat = coords[1, 2], radius = 8,
+                  color = "red", fillColor = "red", fillOpacity = 1, weight = 3, group = "transects",
+                  popup = sprintf("Mission %d START", display_mission[i])) %>%
+                  addLabelOnlyMarkers(lng = coords[1, 1], lat = coords[1, 2],
+                    label = sprintf("START %d", display_mission[i]),
+                    labelOptions = labelOptions(noHide = TRUE, direction = "right", textOnly = TRUE,
+                      style = list("color" = "white", "font-weight" = "bold", "font-size" = "14px",
+                                   "text-shadow" = "2px 2px 4px rgba(0,0,0,0.8)")),
+                    group = "transects")
+              }
               # Numbered marker at end
               map_proxy %>% addLabelOnlyMarkers(lng = coords[nrow(coords),1], lat = coords[nrow(coords),2],
                 label = as.character(i), labelOptions = labelOptions(noHide = TRUE, direction = 'auto', textOnly = TRUE, style = list("color" = "black", "font-weight" = "bold", "font-size" = "14px")), group = "transects")
@@ -3128,6 +3481,42 @@ server <- function(input, output, session) {
   })
 
   # --- Render the Mission Summary Output ---
+  # Compact summary shown above the sidebar tabs, so the effect of a change is
+  # visible from every tab.
+  output$quick_summary <- renderUI({
+    poly_df <- drawn_polygon()
+    if (is.null(poly_df) || nrow(poly_df) < 3) {
+      return(div(class = "quick-empty", "Draw or import a survey area to start."))
+    }
+    plan <- tryCatch(build_plan_summary_data(), error = function(e) NULL)
+    if (is.null(plan)) {
+      return(div(class = "quick-empty", "No route yet: check the Route tab settings."))
+    }
+    m <- plan$metrics
+    chip <- function(label, value, class = "") {
+      div(class = paste("quick-chip", class),
+          tags$span(class = "chip-label", label), tags$span(class = "chip-value", value))
+    }
+    blocking <- (m$airspace_dji_count %||% 0) + (m$airspace_no_fly_count %||% 0)
+    airspace <- if (identical(m$airspace_status, "not_performed")) {
+      chip("Airspace", "Not checked", "chip-warn")
+    } else if (blocking > 0) {
+      chip("Airspace", sprintf("%d no-fly", blocking), "chip-bad")
+    } else if ((m$airspace_caution_count %||% 0) > 0) {
+      chip("Airspace", sprintf("%d caution", m$airspace_caution_count), "chip-warn")
+    } else {
+      chip("Airspace", "No conflicts", "chip-ok")
+    }
+    div(class = "quick-summary",
+      chip("Area", sprintf("%.1f ha", m$area_ha)),
+      chip("Transects", prettyNum(m$transect_count, big.mark = ",")),
+      chip("Time", sprintf("%.0f min", m$flight_time_min)),
+      chip("Batteries", m$batteries),
+      if ((m$mission_count %||% 1L) > 1L) chip("Missions", m$mission_count, "chip-warn"),
+      airspace
+    )
+  })
+
   output$mission_summary <- renderUI({
     area_ha <- polygon_area_m2() / 10000
     area_m2 <- polygon_area_m2()
@@ -3183,6 +3572,21 @@ server <- function(input, output, session) {
       )
     } else ""
 
+    airspace_warning <- if (!is.null(plan_metrics) && length(plan_metrics$airspace_findings) > 0) {
+      paste0(
+        "<div class='alert ",
+        if (plan_metrics$airspace_dji_count + plan_metrics$airspace_no_fly_count > 0) "alert-danger" else "alert-warning",
+        "' style='margin:10px 0 0;'><strong>Airspace (advisory):</strong><ul style='margin:4px 0 4px 18px;padding:0;'>",
+        paste0("<li>", htmltools::htmlEscape(unlist(plan_metrics$airspace_findings)), "</li>", collapse = ""),
+        "</ul><div style='font-size:12px;opacity:0.8;'>",
+        htmltools::htmlEscape(plan_metrics$airspace_summary), "</div></div>"
+      )
+    } else if (!is.null(plan_metrics)) {
+      # Zero findings still states the source, date and advisory status.
+      paste0("<p class='help-block' style='margin:10px 0 0;'><strong>Airspace:</strong> ",
+             htmltools::htmlEscape(plan_metrics$airspace_summary), "</p>")
+    } else ""
+
     HTML(paste0(
       "<div class='mission-metrics-grid'>",
         "<div class='mission-metric-section'>",
@@ -3193,38 +3597,65 @@ server <- function(input, output, session) {
           metric_row("GSD", if (!is.na(gsd_cm)) sprintf("%.2f cm/px", gsd_cm) else "N/A"),
           metric_row("Photo interval", if (!is.na(photo_interval)) sprintf("%.2f s", photo_interval) else "N/A"),
           metric_row("Forward overlap", sprintf("%.1f%%", input$front_overlap)),
+          metric_row("Time", if (!is.na(flight_time_min)) sprintf("%.1f min", flight_time_min) else "N/A"),
+          metric_row(
+            sprintf("Batteries (%d min)", assumed_battery_minutes),
+            if (!is.na(batteries_needed)) sprintf("%d", batteries_needed) else "N/A"
+          ),
         "</div>",
         "<div class='mission-metric-section'>",
           "<div class='mission-metric-heading'>Coverage</div>",
           metric_row("Area", sprintf("%.2f ha", area_ha)),
-          metric_row("Footprint gap", sprintf("%.1f m (%.1f%% sidelap)", transect_gap_m, effective_sidelap)),
+          metric_row("Footprint gap", sprintf("%.1f m", transect_gap_m)),
+          metric_row("Sidelap", sprintf("%.1f%%", effective_sidelap)),
           metric_row("Transects", if (!is.null(plan_metrics)) prettyNum(plan_metrics$transect_count, big.mark = ",") else "N/A"),
           metric_row("Longest transect", if (!is.null(plan_metrics)) sprintf("%.2f km", plan_metrics$longest_transect_km) else "N/A"),
+          metric_row("Photos", if (!is.null(plan_metrics)) prettyNum(plan_metrics$photo_count, big.mark = ",") else "N/A"),
+          metric_row("Distance", if (!is.na(flight_distance_km)) sprintf("%.2f km", flight_distance_km) else "N/A"),
+        "</div>",
+        "<div class='mission-metric-section mission-metric-full'>",
+          "<div class='mission-metric-heading'>Route limits and airspace</div>",
           metric_row("Stationary pilot radius", if (isTRUE(input$limit_pilot_radius)) sprintf("%s m", pilot_distance()) else "Off"),
           metric_row(
             "1.8 km trimming",
             if (!isTRUE(input$trim_transect_length)) {
               "Off"
             } else if (!is.null(plan_metrics) && plan_metrics$trimmed_transect_count > 0) {
-              sprintf(
-                "%d trimmed (max was %.2f km)",
-                plan_metrics$trimmed_transect_count,
-                plan_metrics$original_longest_transect_km
-              )
+              sprintf("%d trimmed (longest was %.2f km)", plan_metrics$trimmed_transect_count,
+                      plan_metrics$original_longest_transect_km)
             } else {
-              "On; none trimmed"
+              "On, none trimmed"
             }
           ),
-          metric_row("Photos", if (!is.null(plan_metrics)) prettyNum(plan_metrics$photo_count, big.mark = ",") else "N/A"),
-          metric_row("Distance", if (!is.na(flight_distance_km)) sprintf("%.2f km", flight_distance_km) else "N/A"),
-          metric_row("Time", if (!is.na(flight_time_min)) sprintf("%.1f min", flight_time_min) else "N/A"),
           metric_row(
-            sprintf("Batteries (%d min each)", assumed_battery_minutes),
-            if (!is.na(batteries_needed)) sprintf("%d", batteries_needed) else "N/A"
+            "Land exclusion",
+            if (!exclude_land_on()) "Off"
+            else if (is.null(plan_metrics)) "On"
+            else if (plan_metrics$land_clip_affected == 0L) "On, no land crossed"
+            else sprintf("%d lines cut · %.2f km removed", plan_metrics$land_clip_affected,
+                         plan_metrics$land_clip_removed_km)
+          ),
+          metric_row(
+            "No-fly clipping",
+            if (!avoid_no_fly_on()) "Off"
+            else if (is.null(plan_metrics)) "On"
+            else if (plan_metrics$airspace_clip_affected == 0L) "On, nothing to clip"
+            else sprintf("%d lines cut · %.2f km removed", plan_metrics$airspace_clip_affected,
+                         plan_metrics$airspace_clip_removed_km)
+          ),
+          if (!is.null(plan_metrics) && (plan_metrics$mission_count %||% 1L) > 1L)
+            metric_row("Missions", sprintf("%d separate flights", plan_metrics$mission_count)) else "",
+          metric_row(
+            "Airspace check",
+            if (is.null(plan_metrics)) "N/A"
+            else if (identical(plan_metrics$airspace_status, "not_performed")) "Not performed"
+            else sprintf("%d DJI · %d no-fly · %d caution", plan_metrics$airspace_dji_count,
+                         plan_metrics$airspace_no_fly_count, plan_metrics$airspace_caution_count)
           ),
         "</div>",
       "</div>",
-      transect_warning
+      transect_warning,
+      airspace_warning
     ))
   })
 
@@ -3284,7 +3715,7 @@ server <- function(input, output, session) {
   }
 
   # --- KMZ Export Handler ---
-  write_kmz_export <- function(file) {
+  write_kmz_export <- function(file, mission = NULL) {
     poly_df <- drawn_polygon()
 
     # Require other parameters
@@ -3317,10 +3748,7 @@ server <- function(input, output, session) {
 
     # Reorder transects based on start corner
     start_corner <- if (is.null(input$start_corner)) "top_left" else input$start_corner
-    transects_ordered <- reorder_transects_by_start(res$transects, start_corner, angle)
-    transects_ordered <- apply_reverse_transect_order(
-      transects_ordered, input$reverse_transect_order
-    )
+    transects_ordered <- order_route(res$transects, start_corner, angle, mission)
 
     # Generate an editable DJI waypoint template with transect-scoped timed
     # photo actions (mapping2d cannot represent the requested zero sidelap).
@@ -3354,7 +3782,7 @@ server <- function(input, output, session) {
   }
 
   # --- Litchi Plan Bundle Export Handler ---
-  write_litchi_export <- function(file) {
+  write_litchi_export <- function(file, mission = NULL) {
     bundle_dir <- tempfile("litchi_bundle_")
     dir.create(bundle_dir, recursive = TRUE)
     on.exit(unlink(bundle_dir, recursive = TRUE, force = TRUE), add = TRUE)
@@ -3388,10 +3816,7 @@ server <- function(input, output, session) {
 
     # Reorder transects based on start corner
     start_corner <- if (is.null(input$start_corner)) "top_left" else input$start_corner
-    transects_ordered <- reorder_transects_by_start(res$transects, start_corner, angle)
-    transects_ordered <- apply_reverse_transect_order(
-      transects_ordered, input$reverse_transect_order
-    )
+    transects_ordered <- order_route(res$transects, start_corner, angle, mission)
 
     # Flatten transects to waypoint list
     waypoints <- data.frame()
@@ -3445,17 +3870,21 @@ server <- function(input, output, session) {
     }
 
     timestamp <- format(Sys.time(), "%Y%m%d_%H%M%S")
-    csv_name <- export_filename("Litchi", ".csv", paste0(
-      "Megafauna_Survey_", drone_model$file_tag, "_", timestamp, ".csv"
+    # Separate missions get their number in every inner file name, so bundles
+    # extracted into one folder never overwrite each other.
+    m_tag <- if (is.null(mission)) "" else sprintf("_Mission_%d", mission)
+    csv_name <- export_filename(paste0("Litchi", m_tag), ".csv", paste0(
+      "Megafauna_Survey_", drone_model$file_tag, m_tag, "_", timestamp, ".csv"
     ), timestamp)
-    lchz_name <- export_filename("Litchi_New_Hub", ".lchz", paste0(
-      "Megafauna_Survey_", drone_model$file_tag, "_New_Hub_", timestamp, ".lchz"
+    lchz_name <- export_filename(paste0("Litchi_New_Hub", m_tag), ".lchz", paste0(
+      "Megafauna_Survey_", drone_model$file_tag, "_New_Hub", m_tag, "_", timestamp, ".lchz"
     ), timestamp)
-    notes_name <- export_filename("Import_Notes", ".txt", "README_IMPORT.txt", timestamp)
+    notes_name <- export_filename(paste0("Import_Notes", m_tag), ".txt",
+      paste0("README_IMPORT", m_tag, ".txt"), timestamp)
 
     validate_litchi_native_plan(waypoints, speed, drone_model)
     write.csv(waypoints, file.path(bundle_dir, csv_name), row.names = FALSE)
-    native_plan <- litchi_native_plan()
+    native_plan <- litchi_native_plan_for(mission)
     write_litchi_lchz(
       file.path(bundle_dir, lchz_name),
       native_plan,
@@ -3529,6 +3958,17 @@ server <- function(input, output, session) {
           "  Stationary pilot: %.6f, %.6f (latitude, longitude); route clipped to %s m radius. Confirm actual visual line of sight.",
           pilot_point()[2], pilot_point()[1], pilot_distance()
         ) else "  Stationary pilot radius limit: off.",
+        {
+          airspace_metrics <- tryCatch(build_plan_summary_data()$metrics, error = function(error) NULL)
+          if (is.null(airspace_metrics)) {
+            "  Airspace check: not performed."
+          } else {
+            c(paste0("  ", airspace_metrics$land_clip_summary),
+              paste0("  ", airspace_metrics$airspace_clip_summary),
+              paste0("  Airspace check (CASA excluded-category rules): ", airspace_metrics$airspace_summary),
+              if (length(airspace_metrics$airspace_findings)) paste0("    - ", unlist(airspace_metrics$airspace_findings)))
+          }
+        },
         "  The CSV format does not store the aircraft model; confirm the profile after import.",
         "  The native plan carries the route settings, but still confirm the displayed aircraft",
         "  profile in the mission application before flight.",
@@ -3565,14 +4005,32 @@ server <- function(input, output, session) {
     timestamp <- format(Sys.time(), "%Y%m%d_%H%M%S")
     named_file <- function(kind, extension) export_filename(kind, extension,
       paste0("Megafauna_", selected_drone()$file_tag, "_", kind, "_", timestamp, extension), timestamp)
+    mission_count <- plan$metrics$mission_count %||% 1L
+    if (mission_count > 1L) {
+      kmz_names <- vapply(seq_len(mission_count), function(m)
+        named_file(sprintf("DJI_Mission_%d", m), ".kmz"), "")
+      litchi_names <- vapply(seq_len(mission_count), function(m)
+        named_file(sprintf("Litchi_Bundle_Mission_%d", m), ".zip"), "")
+    } else {
+      kmz_names <- named_file("DJI_Mission", ".kmz")
+      litchi_names <- named_file("Litchi_Bundle", ".zip")
+    }
     files <- c(
-      kmz = named_file("DJI_Mission", ".kmz"),
-      litchi = named_file("Litchi_Bundle", ".zip"),
+      kmz = kmz_names[1],
+      litchi = litchi_names[1],
       summary = named_file("Plan_Summary", ".html"),
       aoi = named_file("AOI", ".kml")
     )
-    write_kmz_export(file.path(bundle_dir, files[["kmz"]]))
-    write_litchi_export(file.path(bundle_dir, files[["litchi"]]))
+    for (m in seq_len(mission_count)) {
+      mission_arg <- if (mission_count > 1L) m else NULL
+      write_kmz_export(file.path(bundle_dir, kmz_names[m]), mission_arg)
+      write_litchi_export(file.path(bundle_dir, litchi_names[m]), mission_arg)
+    }
+    if (mission_count > 1L) {
+      files <- c(files,
+        setNames(kmz_names[-1], paste0("kmz_", seq_len(mission_count)[-1])),
+        setNames(litchi_names[-1], paste0("litchi_", seq_len(mission_count)[-1])))
+    }
     write_summary_export(file.path(bundle_dir, files[["summary"]]))
     write_aoi_export(file.path(bundle_dir, files[["aoi"]]))
     writeLines(c(
@@ -3584,15 +4042,21 @@ server <- function(input, output, session) {
       "EXTRACT THIS ZIP FIRST",
       "Extract the complete plan into a folder on your computer before using the files.",
       "",
+      if (mission_count > 1L) c(
+        sprintf("SEPARATE MISSIONS: No-fly zones split this survey area into %d parts that", mission_count),
+        "cannot be joined without crossing a zone. Each part is its own mission, with its",
+        "own DJI KMZ and Litchi bundle (numbered 1, 2, ...). Fly them as separate flights,",
+        "taking off from a legal position for each. Do not fly between them.",
+        "") else character(),
       "DJI MISSION (KMZ)",
-      files[["kmz"]],
+      kmz_names,
       "Contains the DJI waypoint route, flight settings and transect photo actions.",
       "Transfer the KMZ to the drone RC via SD card. Import it using the controller's",
       "compatible DJI mission application, then review the route and aircraft settings.",
       "Keep this file as .kmz; do not extract or rename its internal files for import.",
       "",
       "LITCHI PLAN BUNDLE (ZIP)",
-      files[["litchi"]],
+      litchi_names,
       "Extract this inner ZIP. It contains a waypoint CSV, a New Litchi Hub native",
       "plan (.lchz), and detailed import notes (.txt). The CSV and .lchz are alternative",
       "representations of the same mission; use the format supported by your workflow.",
