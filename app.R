@@ -16,6 +16,10 @@
 # 3. Run the command: `shiny::runApp()` in the same directory as the file.
 # ==============================================================================
 
+# Export names and "Created" times use Queensland time (no daylight saving),
+# also on shinyapps.io, whose servers run in UTC.
+Sys.setenv(TZ = "Australia/Brisbane")
+
 library(shiny)
 library(leaflet)
 library(geosphere) # For distance and area calculations
@@ -834,6 +838,22 @@ calculate_optimal_direction <- function(poly_df) {
     diff(range(cross_track))
   }, numeric(1))
   angles[[which.min(widths)]]
+}
+
+# Drops repeated consecutive vertices (a double-click to finish drawing, or a
+# KML that repeats a point) and a closing vertex equal to the first, so they
+# do not make an otherwise good boundary fail validation.
+clean_aoi_vertices <- function(poly_df, tolerance = 1e-7) {
+  if (is.null(poly_df) || nrow(poly_df) < 2) return(poly_df)
+  xy <- as.matrix(poly_df[, 1:2, drop = FALSE])
+  same_as_previous <- c(FALSE, rowSums(abs(diff(xy)) < tolerance) == 2)
+  poly_df <- poly_df[!same_as_previous, , drop = FALSE]
+  n <- nrow(poly_df)
+  if (n > 1 && all(abs(unlist(poly_df[1, 1:2]) - unlist(poly_df[n, 1:2])) < tolerance)) {
+    poly_df <- poly_df[-n, , drop = FALSE]
+  }
+  rownames(poly_df) <- NULL
+  poly_df
 }
 
 validate_aoi_polygon <- function(poly_df) {
@@ -2289,7 +2309,7 @@ server <- function(input, output, session) {
     )
     if (is.null(imported)) return()
 
-    coords_df <- imported$polygon[, c("lng", "lat"), drop = FALSE]
+    coords_df <- clean_aoi_vertices(imported$polygon[, c("lng", "lat"), drop = FALSE])
     if (nrow(coords_df) < 3 || any(!is.finite(as.matrix(coords_df)))) {
       showNotification(
         "The imported plan did not produce a valid editable survey boundary.",
@@ -2442,6 +2462,7 @@ server <- function(input, output, session) {
     tryCatch(
       {
         if (is.null(coords_df)) stop("The drawn feature is not a usable polygon.")
+        coords_df <- clean_aoi_vertices(coords_df)
         validate_aoi_polygon(coords_df)
         drawn_polygon(coords_df)
         TRUE

@@ -225,3 +225,19 @@ test_that("aircraft use DJI's published JPEG minimum photo intervals", {
   expect_true(app_env$validate_model_capture_settings(models$m4e, capture$speed, capture$interval))
   expect_error(app_env$validate_model_capture_settings(models$m4t, 5, 0.5), "below the 0.70 s minimum")
 })
+
+test_that("a drawn boundary with a repeated vertex is accepted", {
+  clean <- app_env$clean_aoi_vertices(data.frame(
+    lng = c(146.90, 146.92, 146.92, 146.92, 146.90, 146.90),
+    lat = c(-19.20, -19.20, -19.20, -19.22, -19.22, -19.20)))
+  expect_equal(nrow(clean), 4L)
+  expect_silent(app_env$validate_aoi_polygon(clean))
+  shiny::testServer(app_env$server, {
+    # Double-clicking to finish repeats the last vertex in the drawn GeoJSON.
+    ring <- list(list(146.90, -19.20), list(146.92, -19.20), list(146.92, -19.22),
+                 list(146.92, -19.22), list(146.90, -19.22), list(146.90, -19.20))
+    session$setInputs(map_draw_new_feature = list(type = "Feature",
+      geometry = list(type = "Polygon", coordinates = list(ring))))
+    expect_equal(nrow(drawn_polygon()), 4L)
+  })
+})
