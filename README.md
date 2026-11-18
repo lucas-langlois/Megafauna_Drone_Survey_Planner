@@ -156,7 +156,9 @@ not clipped.
 When a zone splits the survey area into separate blocks, every remaining
 piece is still flown. The route flies each block back and forth in turn. When
 a straight leg between blocks would cross a zone, the route goes around it,
-using waypoints just outside the zone. The mission metrics, plan summary and
+using waypoints just outside the zone. Detours are flown as transit: no photos
+are taken and they are drawn dashed on the map. If a detour is long, consider
+adjusting the survey area instead. The mission metrics, plan summary and
 Litchi text summary report how much survey line was cut, how many blocks the
 route flies, and the extra distance of any detours.
 

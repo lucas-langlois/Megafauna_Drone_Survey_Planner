@@ -287,3 +287,46 @@ test_that("lines wholly inside a zone are counted and pieces stay with their lin
   expect_equal(sort(c(back[[1]][, 1], back[[2]][, 1])), c(-100, 0, 300, 400), tolerance = 1e-6)
   expect_equal(cut$transects[[3]], lonlat[[3]])
 })
+
+test_that("detour legs in front of a survey line are flown without photos", {
+  app_env <- new.env(parent = globalenv())
+  sys.source(file.path(project_root, "app.R"), envir = app_env, chdir = TRUE)
+  old <- setwd(project_root)
+  on.exit(setwd(old), add = TRUE)
+  shiny::testServer(app_env$server, {
+    session$setInputs(altitude = 60, front_overlap = 80, transect_gap_m = 0,
+      drone_model = "m3e", transect_angle = 0, start_corner = "top_right",
+      reverse_transect_order = FALSE, trim_transect_length = FALSE,
+      show_transects = FALSE, show_photopoints = FALSE, show_footprints = FALSE,
+      pilot_distance_m = 900, limit_pilot_radius = FALSE, export_name = "")
+    drawn_polygon(data.frame(lng = c(146.80, 146.85, 146.85, 146.80),
+                             lat = c(-19.22, -19.22, -19.17, -19.17)))
+    session$flushReact()
+    res <- generate_transects_and_photopoints(drawn_polygon(), 60, 0, camera_params(), 0, FALSE)
+    route <- order_route(res$transects, "top_right", 0)
+    k <- which(vapply(route, nrow, 0L) > 2)[1]
+    expect_false(is.na(k))
+    m <- route[[k]]
+    lead <- app_env$transect_lead_in(m)
+    expect_gt(lead, 0L)
+    survey_m <- geosphere::distGeo(m[nrow(m) - 1, ], m[nrow(m), ])
+    spacing <- capture_settings()$actual_spacing_m
+    # Photo centres only along the survey segment.
+    pp <- app_env$generate_photo_points_for_transects(route[k], spacing)[[1]]
+    expect_equal(nrow(pp), floor(survey_m / spacing) + 1)
+    expect_equal(attr(pp, "bearing"),
+      geosphere::bearing(m[nrow(m) - 1, ], m[nrow(m), ]) %% 360, tolerance = 1e-9)
+    # DJI interval photos start at the survey segment, not the detour.
+    rec <- app_env$build_dji_waypoint_records(route)
+    first_wp <- sum(vapply(route[seq_len(k - 1)], nrow, 0L))
+    expect_equal(unname(rec$transect_ranges[[k]][["start"]]), first_wp + lead)
+    # Litchi: no photo interval on the detour rows.
+    lp <- litchi_native_plan_for()
+    rows <- first_wp + seq_len(nrow(m))
+    expect_equal(lp$photo_timeinterval[rows[seq_len(lead)]], rep(0, lead))
+    expect_gt(lp$photo_timeinterval[rows[lead + 1]], 0)
+    # Survey distance excludes the detour.
+    measured <- app_env$measure_transect_route(route[k])
+    expect_equal(measured$survey_distance_m, survey_m, tolerance = 1)
+  })
+})

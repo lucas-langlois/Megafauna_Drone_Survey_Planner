@@ -18,8 +18,12 @@ airspace_gbrmpa_path <- file.path("data", "gbrmpa_exclusions.geojson")
 # A zone with a lower limit applies only above it. CASA-verified apps show the
 # 300 ft (91.44 m) outer approach paths as "MAX 91M", so the limit is rounded
 # down to whole metres: 91 m is allowed, 91.4 m is not.
-airspace_zone_applies <- function(lower_ft, altitude_m) {
-  lower_ft <= 0 | altitude_m > floor(lower_ft * 0.3048)
+# Only ground-referenced limits can be compared with the planned height above
+# the home point; a zone with any other (or a missing) lower limit always applies.
+airspace_zone_applies <- function(lower_ft, altitude_m, lower_ref = "GND") {
+  if (is.null(lower_ref)) lower_ref <- "GND"
+  ground <- !is.na(lower_ref) & lower_ref == "GND"
+  is.na(lower_ft) | !ground | lower_ft <= 0 | altitude_m > floor(lower_ft * 0.3048)
 }
 
 # Most restrictive first; findings are reported in this order.
@@ -108,7 +112,7 @@ check_airspace <- function(layer, aoi, route = list(), altitude_m = 120, include
   # Zones starting above the flight height (e.g. the 300 ft outer approach
   # paths) do not apply.
   zones <- layer[layer$category %in% names(airspace_severity) &
-                   airspace_zone_applies(layer$lower_ft, altitude_m), ]
+                   airspace_zone_applies(layer$lower_ft, altitude_m, layer$lower_ref), ]
   hits <- zones[lengths(sf::st_intersects(zones, plan)) > 0, ]
   if (route_only && nrow(hits)) {
     # Ignore boundary contact: keep zones the route runs inside for > 1 m.
@@ -144,7 +148,7 @@ check_airspace <- function(layer, aoi, route = list(), altitude_m = 120, include
 airspace_forbidden_union <- function(layer, extent, altitude_m) {
   if (is.null(layer)) return(NULL)
   forbidden <- layer[airspace_severity[layer$category] %in% c("dji-block", "no-fly") &
-                       airspace_zone_applies(layer$lower_ft, altitude_m), ]
+                       airspace_zone_applies(layer$lower_ft, altitude_m, layer$lower_ref), ]
   # Pad so straight east-west or north-south routes still give a valid box.
   extent <- unname(as.numeric(extent)) + c(-0.01, -0.01, 0.01, 0.01)
   box <- sf::st_as_sfc(sf::st_bbox(c(xmin = extent[1], ymin = extent[2],
@@ -278,9 +282,10 @@ route_around_zones <- function(layer, ordered, altitude_m, margin_m = 30, max_de
   # Planar work without a CRS attached (re-parsing the projection for every
   # small predicate was the main cost).
   zones_xy <- sf::st_set_crs(sf::st_transform(zones, crs), NA)
-  # Legs may run along a zone edge (clipped ends sit margin_m outside it);
-  # only entering the zone itself counts.
-  core <- sf::st_buffer(zones_xy, -2)
+  # A leg is legal only if it does not touch the zone itself. Clipped ends sit
+  # margin_m outside it and detour nodes further out, so legs keep clear of the
+  # edge. (An earlier inward 2 m buffer let legs clip corners of the zone.)
+  core <- zones_xy
   leg_ok <- function(a, b) {
     !any(lengths(sf::st_intersects(sf::st_sfc(sf::st_linestring(rbind(a, b))), core)) > 0)
   }
@@ -345,7 +350,10 @@ route_around_zones <- function(layer, ordered, altitude_m, margin_m = 30, max_de
     for (j in seq_along(ix)) {
       m <- pieces[[ix[j]]]
       along <- as.numeric(m %*% u)
-      out[[j]] <- m[order(along, decreasing = at_max), , drop = FALSE]
+      # Reverse the piece if needed rather than sorting its vertices, so a
+      # piece with more than two vertices keeps its shape.
+      forward <- along[length(along)] >= along[1]
+      out[[j]] <- if (forward == at_max) m[nrow(m):1, , drop = FALSE] else m
       at_max <- !at_max
     }
     out

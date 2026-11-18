@@ -640,6 +640,15 @@ validate_model_capture_settings <- function(camera, speed, photo_interval,
 # Build the zero-based waypoint records used by both DJI WPML files. Each
 # transect retains its own start/end indexes so interval actions never include
 # the connector leg to the next transect.
+# Survey lines are straight two-point segments. When the route detours around a
+# no-fly zone, the detour waypoints are put in front of the next survey line
+# (see route_around_zones); they are flown as transit, without photos.
+transect_lead_in <- function(m) max(0L, nrow(m) - 2L)
+survey_segment <- function(m) {
+  n <- nrow(m)
+  m[max(1L, n - 1L):n, , drop = FALSE]
+}
+
 build_dji_waypoint_records <- function(transects) {
   waypoints <- list()
   transect_ranges <- vector("list", length(transects))
@@ -648,7 +657,8 @@ build_dji_waypoint_records <- function(transects) {
   for (i in seq_along(transects)) {
     transect <- transects[[i]]
     if (is.null(transect) || nrow(transect) < 2) next
-    start_idx <- waypoint_idx
+    lead_in <- transect_lead_in(transect)
+    start_idx <- waypoint_idx + lead_in
 
     for (j in seq_len(nrow(transect))) {
       waypoints[[length(waypoints) + 1L]] <- list(
@@ -656,7 +666,7 @@ build_dji_waypoint_records <- function(transects) {
         lng = transect[j, 1],
         lat = transect[j, 2],
         transect = i,
-        is_transect_start = (j == 1L),
+        is_transect_start = (j == lead_in + 1L),
         is_transect_end = (j == nrow(transect))
       )
       waypoint_idx <- waypoint_idx + 1L
@@ -1308,7 +1318,7 @@ trim_transect_to_length <- function(coords, max_length_m) {
 generate_photo_points_for_transects <- function(transects, spacing_m) {
   if (!is.finite(spacing_m) || spacing_m <= 0) return(list())
   lapply(transects, function(coords) {
-    coords <- as.matrix(coords[, 1:2, drop = FALSE])
+    coords <- survey_segment(as.matrix(coords[, 1:2, drop = FALSE]))
     line_length_m <- transect_length_m(coords)
     distances <- seq(0, line_length_m, by = spacing_m)
     centres <- t(vapply(
@@ -1333,8 +1343,13 @@ measure_transect_route <- function(transects) {
       longest_transect_m = 0
     ))
   }
-  lengths <- vapply(transects, transect_length_m, numeric(1))
-  connector_distance_m <- if (length(transects) > 1) {
+  lengths <- vapply(transects, function(m) transect_length_m(survey_segment(m)), numeric(1))
+  # Detour legs in front of a survey line count as transit.
+  detour_m <- sum(vapply(transects, function(m) {
+    k <- transect_lead_in(m)
+    if (k) transect_length_m(m[seq_len(k + 1L), , drop = FALSE]) else 0
+  }, numeric(1)))
+  connector_distance_m <- detour_m + if (length(transects) > 1) {
     sum(vapply(seq_len(length(transects) - 1L), function(index) {
       current <- transects[[index]]
       next_line <- transects[[index + 1L]]
@@ -1358,8 +1373,9 @@ measure_transect_route <- function(transects) {
 build_litchi_native_plan <- function(transects, altitude, speed, photo_interval,
                                      drone_model = NULL) {
   if (length(transects) == 0) stop("At least one transect is required.")
-  if (!is.finite(photo_interval) || photo_interval < 0.7) {
-    stop("Photo interval must be at least 0.7 seconds.")
+  min_interval <- litchi_min_interval(drone_model)
+  if (!is.finite(photo_interval) || photo_interval < min_interval - 1e-9) {
+    stop(sprintf("Photo interval must be at least %.1f seconds.", min_interval))
   }
   if (!is.null(drone_model)) {
     validate_model_capture_settings(
@@ -1370,12 +1386,12 @@ build_litchi_native_plan <- function(transects, altitude, speed, photo_interval,
   plan_rows <- list()
   for (transect in transects) {
     if (nrow(transect) < 2) next
+    survey <- survey_segment(transect)
     heading <- geosphere::bearing(
-      as.numeric(transect[1, 1:2]),
-      as.numeric(transect[nrow(transect), 1:2])
+      as.numeric(survey[1, 1:2]), as.numeric(survey[2, 1:2])
     ) %% 360
     interval_values <- rep(photo_interval, nrow(transect))
-    interval_values[nrow(transect)] <- 0
+    interval_values[c(seq_len(transect_lead_in(transect)), nrow(transect))] <- 0
 
     plan_rows[[length(plan_rows) + 1]] <- data.frame(
       latitude = transect[, 2],
@@ -1595,6 +1611,13 @@ generate_waylines_wpml <- function(transects, altitude, speed, photo_interval,
 
 # The native New Litchi Hub format is proprietary. This writer follows the
 # version-15 LCH2 layout verified against the New Litchi Mission Hub client.
+# Shortest photo interval an export may use: the selected camera's minimum
+# (0.5 s for the M4E), or 0.5 s when no aircraft is given.
+litchi_min_interval <- function(drone_model = NULL) {
+  value <- drone_model$min_photo_interval
+  if (is.null(value) || !is.finite(value)) 0.5 else value
+}
+
 validate_litchi_native_plan <- function(plan, cruise_speed, drone_model = NULL) {
   required <- c(
     "latitude", "longitude", "altitude(m)", "heading(deg)",
@@ -1623,7 +1646,8 @@ validate_litchi_native_plan <- function(plan, cruise_speed, drone_model = NULL) 
     stop("Megafauna native exports require non-negative interval values.")
   }
   active_intervals <- plan$photo_timeinterval[plan$photo_timeinterval > 0]
-  if (length(active_intervals) == 0 || any(active_intervals < 0.7)) {
+  if (length(active_intervals) == 0 ||
+      any(active_intervals < litchi_min_interval(drone_model) - 1e-9)) {
     stop("Megafauna native exports require valid interval capture on transects.")
   }
   if (!is.null(drone_model)) {
@@ -3243,8 +3267,16 @@ server <- function(input, output, session) {
           if (input$show_transects && length(transects_display) > 0) {
             for (i in seq_along(transects_display)) {
               coords <- transects_display[[i]]
+              # Detour around a no-fly zone before this line: transit, dashed white
+              lead_in <- transect_lead_in(coords)
+              if (lead_in > 0) {
+                detour <- coords[seq_len(lead_in + 1L), , drop = FALSE]
+                map_proxy %>% addPolylines(lng = detour[, 1], lat = detour[, 2], color = "#ffffff",
+                  weight = 2, opacity = 0.9, dashArray = "5 5", group = "transects")
+              }
               # Survey leg, photos taken: solid orange
-              map_proxy %>% addPolylines(lng = coords[,1], lat = coords[,2], color = "#ff9800",
+              survey <- survey_segment(coords)
+              map_proxy %>% addPolylines(lng = survey[,1], lat = survey[,2], color = "#ff9800",
                 weight = 3, opacity = 1, group = "transects")
               
               # Transit leg to the next transect, no photos: thin dashed white
@@ -3848,11 +3880,10 @@ server <- function(input, output, session) {
       n_points <- nrow(transect)
 
       # Calculate heading for this transect (direction from first to last point)
+      lead_in <- transect_lead_in(transect)
       if (n_points >= 2) {
-        bearing <- geosphere::bearing(
-          c(transect[1, 1], transect[1, 2]),
-          c(transect[n_points, 1], transect[n_points, 2])
-        )
+        survey <- survey_segment(transect)
+        bearing <- geosphere::bearing(c(survey[1, 1], survey[1, 2]), c(survey[2, 1], survey[2, 2]))
         # Normalize bearing to 0-360
         if (bearing < 0) bearing <- bearing + 360
       } else {
@@ -3878,7 +3909,8 @@ server <- function(input, output, session) {
           poi_longitude = 0,
           `poi_altitude(m)` = 0,
           poi_altitudemode = 0,
-          photo_timeinterval = if (j < n_points) round(photo_interval, 2) else 0,  # Photo interval except at transect ends
+          # Photos only on the survey segment, not on detour legs or after the end.
+          photo_timeinterval = if (j > lead_in && j < n_points) round(photo_interval, 2) else 0,
           photo_distinterval = 0,
           check.names = FALSE
         )

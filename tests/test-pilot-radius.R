@@ -241,3 +241,20 @@ test_that("a drawn boundary with a repeated vertex is accepted", {
     expect_equal(nrow(drawn_polygon()), 4L)
   })
 })
+
+test_that("M4E plans export at intervals below 0.7 s", {
+  shiny::testServer(app_env$server, {
+    session$setInputs(altitude = 40, front_overlap = 80, transect_gap_m = 0,
+      drone_model = "m4e", transect_angle = 0, start_corner = "top_right",
+      reverse_transect_order = FALSE, trim_transect_length = FALSE,
+      show_transects = FALSE, show_photopoints = FALSE, show_footprints = FALSE,
+      pilot_distance_m = 900, limit_pilot_radius = FALSE, export_name = "")
+    drawn_polygon(data.frame(lng = c(147.20, 147.21, 147.21, 147.20),
+                             lat = c(-19.005, -19.005, -19.00, -19.00)))
+    session$flushReact()
+    expect_lt(capture_settings()$interval, 0.7)
+    archive <- tempfile(fileext = ".zip")
+    expect_no_error(write_complete_plan(archive))
+    expect_true(any(grepl("Litchi_Bundle.*[.]zip$", zip::zip_list(archive)$filename)))
+  })
+})
